@@ -1,0 +1,187 @@
+{% extends "base.html" %}
+{% block title %}文档管理 — 智能法律助手{% endblock %}
+
+{% block head %}
+<style>
+    .page-layout { display: flex; height: 100vh; position: relative; z-index: 1; }
+    .page-sidebar { width: 260px; background: var(--c-surface); border-right: 1px solid var(--c-border-light); padding: var(--sp-4); display: flex; flex-direction: column; flex-shrink: 0; }
+    .page-sidebar .brand { display: flex; align-items: center; gap: var(--sp-2); margin-bottom: var(--sp-6); }
+    .page-sidebar .brand-icon { font-size: 1.3rem; }
+    .page-sidebar .brand-text { font-family: var(--font-serif); font-size: var(--text-lg); font-weight: 600; color: var(--c-primary); }
+    .page-sidebar .nav-item { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-2) var(--sp-3); border-radius: var(--radius-sm); color: var(--c-text-secondary); font-size: var(--text-sm); transition: all var(--duration-fast); text-decoration: none; margin-bottom: var(--sp-1); }
+    .page-sidebar .nav-item:hover { background: var(--c-bg-warm); color: var(--c-primary); }
+    .page-sidebar .nav-item.active { background: var(--c-primary); color: var(--c-text-on-primary); }
+    .page-main { flex: 1; overflow-y: auto; padding: var(--sp-8); }
+    .page-header { margin-bottom: var(--sp-6); }
+    .page-header h1 { font-family: var(--font-serif); font-size: var(--text-2xl); color: var(--c-primary); margin-bottom: var(--sp-1); }
+    .page-header p { color: var(--c-text-muted); font-size: var(--text-sm); }
+    .card { background: var(--c-surface); border: 1px solid var(--c-border-light); border-radius: var(--radius-md); padding: var(--sp-6); margin-bottom: var(--sp-6); box-shadow: var(--shadow-sm); }
+    .card h2 { font-family: var(--font-serif); font-size: var(--text-xl); color: var(--c-primary); margin-bottom: var(--sp-4); padding-bottom: var(--sp-3); border-bottom: 1px solid var(--c-border-light); }
+    .file-drop { border: 2px dashed var(--c-border); border-radius: var(--radius-md); padding: var(--sp-8); text-align: center; transition: all var(--duration-fast); cursor: pointer; }
+    .file-drop:hover, .file-drop.dragover { border-color: var(--c-primary-light); background: rgba(59,90,138,0.03); }
+    .file-drop-icon { font-size: 2rem; margin-bottom: var(--sp-2); opacity: 0.4; }
+    .file-drop p { color: var(--c-text-muted); font-size: var(--text-sm); }
+    .file-drop .browse { color: var(--c-primary-light); font-weight: 500; cursor: pointer; }
+    .file-info-bar { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-3) var(--sp-4); background: var(--c-surface-alt); border-radius: var(--radius-sm); margin-top: var(--sp-3); font-size: var(--text-sm); }
+    .file-info-bar .name { flex: 1; font-weight: 500; color: var(--c-text); }
+    .file-info-bar .size { color: var(--c-text-muted); }
+    .doc-list { display: flex; flex-direction: column; gap: var(--sp-2); }
+    .doc-item { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-3) var(--sp-4); border-radius: var(--radius-sm); transition: background var(--duration-fast); }
+    .doc-item:hover { background: var(--c-surface-alt); }
+    .doc-icon { width: 36px; height: 36px; border-radius: var(--radius-sm); display: flex; align-items: center; justify-content: center; font-size: 1.1rem; flex-shrink: 0; }
+    .doc-icon.pdf { background: #fdf2f2; color: var(--c-error); }
+    .doc-icon.docx { background: #f0f6fa; color: var(--c-info); }
+    .doc-icon.txt { background: var(--c-bg-warm); color: var(--c-text-secondary); }
+    .doc-details { flex: 1; min-width: 0; }
+    .doc-name { font-size: var(--text-sm); font-weight: 500; color: var(--c-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .doc-meta { font-size: var(--text-xs); color: var(--c-text-muted); display: flex; gap: var(--sp-3); margin-top: 2px; }
+    .doc-kb-tag { font-size: var(--text-xs); background: rgba(200,164,92,0.12); color: var(--c-primary); padding: 1px 6px; border-radius: 999px; }
+    .empty-state { text-align: center; padding: var(--sp-10) 0; color: var(--c-text-muted); }
+    .empty-state .icon { font-size: 2.5rem; opacity: 0.3; margin-bottom: var(--sp-3); }
+    @media (max-width: 768px) { .page-sidebar { display: none; } .page-main { padding: var(--sp-4); } }
+</style>
+{% endblock %}
+
+{% block body %}
+<div class="page-layout">
+    <aside class="page-sidebar">
+        <a href="/" class="brand" style="text-decoration:none">
+            <span class="brand-icon">&#9878;</span>
+            <span class="brand-text">法律助手</span>
+        </a>
+        <a href="/" class="nav-item">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+            对话
+        </a>
+        <a href="/upload" class="nav-item active">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            文档管理
+        </a>
+        <a href="/knowledge-bases" class="nav-item">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
+            知识库
+        </a>
+    </aside>
+
+    <main class="page-main">
+        <div class="page-header fade-in">
+            <h1>文档管理</h1>
+            <p>上传文档到知识库，支持 PDF、DOCX、TXT 格式</p>
+        </div>
+
+        <div class="card fade-in fade-in-delay-1">
+            <h2>上传文档</h2>
+            <form method="POST" action="/upload" enctype="multipart/form-data" id="uploadForm">
+                <div class="form-group">
+                    <label class="form-label" for="kbSelect">目标知识库</label>
+                    <select class="form-input" id="kbSelect" name="knowledge_base_id">
+                        <option value="">-- 不指定知识库 --</option>
+                        {% for kb in knowledge_bases %}
+                        <option value="{{ kb.id }}">{{ kb.name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">选择文件</label>
+                    <div class="file-drop" id="fileDrop">
+                        <div class="file-drop-icon">&#128196;</div>
+                        <p>拖放文件到这里，或 <span class="browse">点击浏览</span></p>
+                        <p style="margin-top:4px;font-size:0.75rem;">支持 PDF / DOCX / TXT，最大 10MB</p>
+                    </div>
+                    <input type="file" name="file" id="fileInput" accept=".pdf,.docx,.txt" style="display:none" required>
+                    <div class="file-info-bar" id="fileInfo" style="display:none">
+                        <span class="name" id="fileName"></span>
+                        <span class="size" id="fileSize"></span>
+                        <button type="button" class="btn btn-ghost btn-sm" id="clearFile" title="移除文件">&times;</button>
+                    </div>
+                </div>
+
+                <button type="submit" class="btn btn-primary" id="submitBtn">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                    上传文档
+                </button>
+            </form>
+        </div>
+
+        <div class="card fade-in fade-in-delay-2">
+            <h2>上传记录</h2>
+            {% if uploaded_docs %}
+            <div class="doc-list">
+                {% for doc in uploaded_docs %}
+                <div class="doc-item">
+                    <div class="doc-icon {{ doc.file_type }}">
+                        {% if doc.file_type == 'pdf' %}&#128196;{% elif doc.file_type == 'docx' %}&#128221;{% else %}&#128203;{% endif %}
+                    </div>
+                    <div class="doc-details">
+                        <div class="doc-name">{{ doc.filename }}</div>
+                        <div class="doc-meta">
+                            <span>{{ doc.file_type|upper }}</span>
+                            <span>{{ "%.2f"|format(doc.file_size / 1024 / 1024) }} MB</span>
+                            <span>{{ doc.uploaded_at.strftime('%Y-%m-%d %H:%M') }}</span>
+                            {% if doc.knowledge_base %}
+                            <span class="doc-kb-tag">{{ doc.knowledge_base.name }}</span>
+                            {% endif %}
+                        </div>
+                    </div>
+                    <form method="POST" action="/upload/{{ doc.id }}/delete" onsubmit="return confirm('确定删除此文档？');">
+                        <button type="submit" class="btn btn-ghost btn-sm" style="color:var(--c-error);" title="删除">
+                            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+                        </button>
+                    </form>
+                </div>
+                {% endfor %}
+            </div>
+            {% else %}
+            <div class="empty-state">
+                <div class="icon">&#128193;</div>
+                <p>暂无上传记录</p>
+            </div>
+            {% endif %}
+        </div>
+    </main>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const fileDrop = document.getElementById('fileDrop');
+    const fileInput = document.getElementById('fileInput');
+    const fileInfo = document.getElementById('fileInfo');
+    const fileName = document.getElementById('fileName');
+    const fileSize = document.getElementById('fileSize');
+    const clearFile = document.getElementById('clearFile');
+
+    fileDrop.addEventListener('click', () => fileInput.click());
+
+    ['dragenter','dragover'].forEach(e => fileDrop.addEventListener(e, ev => { ev.preventDefault(); fileDrop.classList.add('dragover'); }));
+    ['dragleave','drop'].forEach(e => fileDrop.addEventListener(e, ev => { ev.preventDefault(); fileDrop.classList.remove('dragover'); }));
+
+    fileDrop.addEventListener('drop', e => {
+        if (e.dataTransfer.files.length) { fileInput.files = e.dataTransfer.files; showFileInfo(e.dataTransfer.files[0]); }
+    });
+
+    fileInput.addEventListener('change', () => {
+        if (fileInput.files.length) showFileInfo(fileInput.files[0]);
+    });
+
+    function showFileInfo(file) {
+        fileName.textContent = file.name;
+        const mb = (file.size / 1024 / 1024).toFixed(2);
+        fileSize.textContent = mb + ' MB';
+        fileInfo.style.display = 'flex';
+        fileDrop.style.display = 'none';
+    }
+
+    clearFile.addEventListener('click', () => {
+        fileInput.value = '';
+        fileInfo.style.display = 'none';
+        fileDrop.style.display = '';
+    });
+
+    document.getElementById('uploadForm').addEventListener('submit', function() {
+        document.getElementById('submitBtn').disabled = true;
+        document.getElementById('submitBtn').textContent = '上传中...';
+    });
+});
+</script>
+{% endblock %}

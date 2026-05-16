@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block title %}知识库管理 — 智能法律助手{% endblock %}
+
+{% block head %}
+<style>
+    .page-layout { display: flex; height: 100vh; position: relative; z-index: 1; }
+    .page-sidebar { width: 260px; background: var(--c-surface); border-right: 1px solid var(--c-border-light); padding: var(--sp-4); display: flex; flex-direction: column; flex-shrink: 0; }
+    .page-sidebar .brand { display: flex; align-items: center; gap: var(--sp-2); margin-bottom: var(--sp-6); text-decoration: none; }
+    .page-sidebar .brand-icon { font-size: 1.3rem; }
+    .page-sidebar .brand-text { font-family: var(--font-serif); font-size: var(--text-lg); font-weight: 600; color: var(--c-primary); }
+    .page-sidebar .nav-item { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-2) var(--sp-3); border-radius: var(--radius-sm); color: var(--c-text-secondary); font-size: var(--text-sm); transition: all var(--duration-fast); text-decoration: none; margin-bottom: var(--sp-1); }
+    .page-sidebar .nav-item:hover { background: var(--c-bg-warm); color: var(--c-primary); }
+    .page-sidebar .nav-item.active { background: var(--c-primary); color: var(--c-text-on-primary); }
+    .page-main { flex: 1; overflow-y: auto; padding: var(--sp-8); }
+    .page-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--sp-6); }
+    .page-header h1 { font-family: var(--font-serif); font-size: var(--text-2xl); color: var(--c-primary); }
+    .page-header p { color: var(--c-text-muted); font-size: var(--text-sm); margin-top: var(--sp-1); }
+    .kb-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: var(--sp-4); }
+    .kb-card { background: var(--c-surface); border: 1px solid var(--c-border-light); border-radius: var(--radius-md); padding: var(--sp-5); transition: all var(--duration) var(--ease-out); display: flex; flex-direction: column; }
+    .kb-card:hover { box-shadow: var(--shadow-md); border-color: var(--c-border); transform: translateY(-2px); }
+    .kb-card-header { display: flex; align-items: center; gap: var(--sp-3); margin-bottom: var(--sp-3); }
+    .kb-card-icon { width: 40px; height: 40px; background: var(--c-primary); border-radius: var(--radius-sm); display: flex; align-items: center; justify-content: center; color: var(--c-text-on-primary); font-size: 1.2rem; flex-shrink: 0; }
+    .kb-card-title { font-family: var(--font-serif); font-size: var(--text-lg); font-weight: 600; color: var(--c-primary); }
+    .kb-card-desc { font-size: var(--text-sm); color: var(--c-text-muted); line-height: 1.6; flex: 1; margin-bottom: var(--sp-4); }
+    .kb-card-meta { display: flex; gap: var(--sp-4); font-size: var(--text-xs); color: var(--c-text-muted); margin-bottom: var(--sp-4); padding-top: var(--sp-3); border-top: 1px solid var(--c-border-light); }
+    .kb-card-actions { display: flex; gap: var(--sp-2); }
+    .empty-state { text-align: center; padding: var(--sp-16) 0; color: var(--c-text-muted); }
+    .empty-state .icon { font-size: 3rem; opacity: 0.25; margin-bottom: var(--sp-4); }
+    .empty-state h3 { font-family: var(--font-serif); color: var(--c-text-secondary); margin-bottom: var(--sp-2); }
+    @media (max-width: 768px) { .page-sidebar { display: none; } .page-main { padding: var(--sp-4); } .kb-grid { grid-template-columns: 1fr; } }
+</style>
+{% endblock %}
+
+{% block body %}
+<div class="page-layout">
+    <aside class="page-sidebar">
+        <a href="/" class="brand"><span class="brand-icon">&#9878;</span><span class="brand-text">法律助手</span></a>
+        <a href="/" class="nav-item">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+            对话
+        </a>
+        <a href="/upload" class="nav-item">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            文档管理
+        </a>
+        <a href="/knowledge-bases" class="nav-item active">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
+            知识库
+        </a>
+    </aside>
+
+    <main class="page-main">
+        <div class="page-header fade-in">
+            <div>
+                <h1>我的知识库</h1>
+                <p>管理知识库，分类整理法律文档</p>
+            </div>
+            <a href="/knowledge-base/create" class="btn btn-primary">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                新建知识库
+            </a>
+        </div>
+
+        {% if knowledge_bases %}
+        <div class="kb-grid fade-in fade-in-delay-1">
+            {% for kb in knowledge_bases %}
+            <div class="kb-card">
+                <div class="kb-card-header">
+                    <div class="kb-card-icon">&#128218;</div>
+                    <div class="kb-card-title">{{ kb.name }}</div>
+                </div>
+                <div class="kb-card-desc">{{ kb.description or '暂无描述' }}</div>
+                <div class="kb-card-meta">
+                    <span>{{ kb.documents|length }} 个文档</span>
+                    <span>更新于 {{ kb.updated_at.strftime('%Y-%m-%d') }}</span>
+                </div>
+                <div class="kb-card-actions">
+                    <a href="/knowledge-base/{{ kb.id }}/edit" class="btn btn-outline btn-sm">编辑</a>
+                    <form method="POST" action="/knowledge-base/{{ kb.id }}/delete" onsubmit="return confirm('确定删除此知识库？关联文档也将被删除。');" style="display:inline">
+                        <button type="submit" class="btn btn-danger btn-sm">删除</button>
+                    </form>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="empty-state fade-in">
+            <div class="icon">&#128218;</div>
+            <h3>还没有知识库</h3>
+            <p>创建一个知识库来整理您的法律文档</p>
+            <a href="/knowledge-base/create" class="btn btn-primary" style="margin-top:var(--sp-4)">新建知识库</a>
+        </div>
+        {% endif %}
+    </main>
+</div>
+{% endblock %}

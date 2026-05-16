@@ -1,0 +1,211 @@
+{% extends "base.html" %}
+
+{% block title %}登录 — 智能法律助手{% endblock %}
+
+{% block head %}
+<style>
+    .auth-page {
+        min-height: 100vh;
+        display: flex;
+        position: relative;
+        z-index: 1;
+    }
+
+    .auth-hero {
+        flex: 1;
+        background: var(--c-primary);
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        padding: var(--sp-12);
+        position: relative;
+        overflow: hidden;
+    }
+
+    .auth-hero::before {
+        content: '';
+        position: absolute;
+        inset: 0;
+        background:
+            radial-gradient(circle at 20% 80%, rgba(200,164,92,0.15) 0%, transparent 50%),
+            radial-gradient(circle at 80% 20%, rgba(61,90,138,0.2) 0%, transparent 50%);
+    }
+
+    .auth-hero-content {
+        position: relative;
+        z-index: 1;
+        text-align: center;
+        max-width: 400px;
+    }
+
+    .auth-hero .brand-icon {
+        width: 72px;
+        height: 72px;
+        background: rgba(200,164,92,0.15);
+        border: 2px solid var(--c-accent);
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin: 0 auto var(--sp-6);
+        font-size: 2rem;
+    }
+
+    .auth-hero h1 {
+        font-family: var(--font-serif);
+        font-size: var(--text-3xl);
+        color: #fff;
+        margin-bottom: var(--sp-4);
+        letter-spacing: 0.05em;
+    }
+
+    .auth-hero p {
+        color: rgba(255,255,255,0.6);
+        font-size: var(--text-base);
+        line-height: 1.8;
+    }
+
+    .auth-hero .accent-line {
+        width: 60px;
+        height: 2px;
+        background: var(--c-accent);
+        margin: var(--sp-6) auto;
+    }
+
+    .auth-form-panel {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        padding: var(--sp-12);
+        background: var(--c-surface);
+    }
+
+    .auth-form-container {
+        width: 100%;
+        max-width: 380px;
+    }
+
+    .auth-form-container h2 {
+        font-family: var(--font-serif);
+        font-size: var(--text-2xl);
+        color: var(--c-primary);
+        margin-bottom: var(--sp-1);
+    }
+
+    .auth-form-container .subtitle {
+        color: var(--c-text-muted);
+        font-size: var(--text-sm);
+        margin-bottom: var(--sp-8);
+    }
+
+    .auth-form .form-input {
+        height: 48px;
+        font-size: var(--text-sm);
+    }
+
+    .auth-form .btn-primary {
+        height: 48px;
+        font-size: var(--text-base);
+        margin-top: var(--sp-2);
+    }
+
+    .auth-footer {
+        margin-top: var(--sp-6);
+        text-align: center;
+        font-size: var(--text-sm);
+        color: var(--c-text-muted);
+    }
+
+    .auth-footer a {
+        color: var(--c-primary-light);
+        font-weight: 500;
+    }
+
+    .remember-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-top: var(--sp-3);
+    }
+
+    .remember-row label {
+        display: flex;
+        align-items: center;
+        gap: var(--sp-2);
+        font-size: var(--text-sm);
+        color: var(--c-text-secondary);
+        cursor: pointer;
+    }
+
+    .remember-row input[type="checkbox"] {
+        accent-color: var(--c-primary);
+        width: 16px;
+        height: 16px;
+    }
+
+    @media (max-width: 768px) {
+        .auth-hero { display: none; }
+        .auth-form-panel { padding: var(--sp-6); }
+    }
+</style>
+{% endblock %}
+
+{% block body %}
+<div class="auth-page">
+    <div class="auth-hero">
+        <div class="auth-hero-content fade-in">
+            <div class="brand-icon">&#9878;</div>
+            <h1>智能法律助手</h1>
+            <div class="accent-line"></div>
+            <p>基于 RAG 架构的专业法律咨询系统<br>为您提供准确、可靠的法律建议</p>
+        </div>
+    </div>
+
+    <div class="auth-form-panel">
+        <div class="auth-form-container fade-in fade-in-delay-1">
+            <h2>欢迎回来</h2>
+            <p class="subtitle">请登录您的账户</p>
+
+            {% if error %}
+            <div class="alert alert-error">{{ error }}</div>
+            {% endif %}
+
+            {% if success %}
+            <div class="alert alert-success">{{ success }}</div>
+            {% endif %}
+
+            <form class="auth-form" method="POST" action="/login">
+                <div class="form-group">
+                    <label class="form-label" for="identifier">手机号</label>
+                    <input class="form-input" type="text" id="identifier" name="identifier"
+                           placeholder="请输入手机号" required autofocus>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label" for="password">密码</label>
+                    <input class="form-input" type="password" id="password" name="password"
+                           placeholder="请输入密码" required>
+                </div>
+
+                <div class="remember-row">
+                    <label>
+                        <input type="checkbox" name="remember" value="1">
+                        记住登录
+                    </label>
+                </div>
+
+                <button type="submit" class="btn btn-primary btn-block btn-lg" style="margin-top: var(--sp-6);">
+                    登 录
+                </button>
+            </form>
+
+            <div class="auth-footer">
+                还没有账户？<a href="/register">立即注册</a>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

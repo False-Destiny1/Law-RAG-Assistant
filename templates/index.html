@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+
+{% block title %}智能法律助手{% endblock %}
+
+{% block head %}
+<link rel="stylesheet" href="/static/css/index.css">
+{% endblock %}
+
+{% block body %}
+<div class="app-layout">
+    <!-- Sidebar -->
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <div class="brand">
+                <span class="brand-icon">&#9878;</span>
+                <span class="brand-text">法律助手</span>
+            </div>
+            <button type="button" class="sidebar-toggle" id="sidebarToggle" title="收起侧栏">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
+            </button>
+        </div>
+
+        <button type="button" class="btn btn-accent btn-block new-chat-btn" id="newChatBtn">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            新建对话
+        </button>
+
+        <div class="sidebar-nav">
+            {% if user.role in ['expert', 'admin'] %}
+            <a href="/upload" class="nav-item">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                文档管理
+            </a>
+            <a href="/knowledge-bases" class="nav-item">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
+                知识库
+            </a>
+            {% endif %}
+        </div>
+
+        <div class="sidebar-section">
+            <div class="section-title">对话历史</div>
+            <div class="chat-list" id="chatList">
+                <!-- Dynamically loaded -->
+            </div>
+        </div>
+
+        <div class="sidebar-footer">
+            <div class="user-info">
+                <div class="user-avatar">{{ user.username[0] }}</div>
+                <div class="user-details">
+                    <div class="user-name">{{ user.username }}</div>
+                    <div class="user-role">{% if user.role == 'admin' %}管理员{% elif user.role == 'expert' %}专家{% else %}用户{% endif %}</div>
+                </div>
+            </div>
+            <a href="/logout" class="btn btn-ghost btn-sm" title="退出登录">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+            </a>
+        </div>
+    </aside>
+
+    <!-- Main chat area -->
+    <main class="chat-main">
+        <!-- KB selector bar -->
+        <div class="chat-topbar" id="chatTopbar">
+            <button type="button" class="mobile-menu-btn" id="mobileMenuBtn" title="打开菜单">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+            </button>
+            <div class="topbar-title" id="chatTitle">新对话</div>
+            <div class="topbar-actions">
+                <select class="kb-select" id="kbSelector" title="选择知识库">
+                    <option value="">全部知识库</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- Messages -->
+        <div class="chat-messages" id="chatBox">
+            <div class="message-row bot fade-in">
+                <div class="message-avatar">
+                    <span>&#9878;</span>
+                </div>
+                <div class="message-body">
+                    <div class="message-name">法律助手</div>
+                    <div class="message-content">
+                        <p>您好！我是智能法律助手，专注于为您提供专业的法律咨询服务。</p>
+                        <p>您可以向我提问任何法律相关的问题，我会基于法律法规为您提供参考意见。</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Input area -->
+        <div class="chat-input-area">
+            <div class="input-wrapper">
+                <textarea id="userInput" class="chat-input" placeholder="输入您的法律问题..." rows="1"
+                          autocomplete="off"></textarea>
+                <button id="sendBtn" class="send-btn" title="发送">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                </button>
+            </div>
+            <div class="input-hint">Enter 发送，Shift + Enter 换行</div>
+        </div>
+    </main>
+</div>
+
+<script src="/static/js/index.js"></script>
+{% endblock %}

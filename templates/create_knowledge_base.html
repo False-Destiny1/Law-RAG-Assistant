@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}新建知识库 — 智能法律助手{% endblock %}
+
+{% block head %}
+<style>
+    .page-layout { display: flex; height: 100vh; position: relative; z-index: 1; }
+    .page-sidebar { width: 260px; background: var(--c-surface); border-right: 1px solid var(--c-border-light); padding: var(--sp-4); display: flex; flex-direction: column; flex-shrink: 0; }
+    .page-sidebar .brand { display: flex; align-items: center; gap: var(--sp-2); margin-bottom: var(--sp-6); text-decoration: none; }
+    .page-sidebar .brand-icon { font-size: 1.3rem; }
+    .page-sidebar .brand-text { font-family: var(--font-serif); font-size: var(--text-lg); font-weight: 600; color: var(--c-primary); }
+    .page-sidebar .nav-item { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-2) var(--sp-3); border-radius: var(--radius-sm); color: var(--c-text-secondary); font-size: var(--text-sm); transition: all var(--duration-fast); text-decoration: none; margin-bottom: var(--sp-1); }
+    .page-sidebar .nav-item:hover { background: var(--c-bg-warm); color: var(--c-primary); }
+    .page-sidebar .nav-item.active { background: var(--c-primary); color: var(--c-text-on-primary); }
+    .page-main { flex: 1; overflow-y: auto; padding: var(--sp-8); display: flex; justify-content: center; }
+    .form-card { background: var(--c-surface); border: 1px solid var(--c-border-light); border-radius: var(--radius-md); padding: var(--sp-8); width: 100%; max-width: 520px; box-shadow: var(--shadow-sm); height: fit-content; }
+    .form-card h1 { font-family: var(--font-serif); font-size: var(--text-2xl); color: var(--c-primary); margin-bottom: var(--sp-1); }
+    .form-card .subtitle { color: var(--c-text-muted); font-size: var(--text-sm); margin-bottom: var(--sp-6); }
+    .form-actions { display: flex; gap: var(--sp-3); margin-top: var(--sp-6); }
+    @media (max-width: 768px) { .page-sidebar { display: none; } }
+</style>
+{% endblock %}
+
+{% block body %}
+<div class="page-layout">
+    <aside class="page-sidebar">
+        <a href="/" class="brand"><span class="brand-icon">&#9878;</span><span class="brand-text">法律助手</span></a>
+        <a href="/" class="nav-item">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+            对话
+        </a>
+        <a href="/upload" class="nav-item">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            文档管理
+        </a>
+        <a href="/knowledge-bases" class="nav-item active">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
+            知识库
+        </a>
+    </aside>
+
+    <main class="page-main">
+        <div class="form-card fade-in">
+            <h1>新建知识库</h1>
+            <p class="subtitle">创建一个知识库来分类整理您的法律文档</p>
+
+            <form method="POST" action="/knowledge-base/create">
+                <div class="form-group">
+                    <label class="form-label" for="name">知识库名称</label>
+                    <input class="form-input" type="text" id="name" name="name" placeholder="例如：合同法律资料库" required autofocus>
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="description">描述（可选）</label>
+                    <textarea class="form-input" id="description" name="description" rows="4" placeholder="描述这个知识库的用途和包含的内容"></textarea>
+                </div>
+                <div class="form-actions">
+                    <a href="/knowledge-bases" class="btn btn-outline">取消</a>
+                    <button type="submit" class="btn btn-primary">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+                        创建知识库
+                    </button>
+                </div>
+            </form>
+        </div>
+    </main>
+</div>
+{% endblock %}

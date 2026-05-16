@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block title %}编辑知识库 — 智能法律助手{% endblock %}
+
+{% block head %}
+<style>
+    .page-layout { display: flex; height: 100vh; position: relative; z-index: 1; }
+    .page-sidebar { width: 260px; background: var(--c-surface); border-right: 1px solid var(--c-border-light); padding: var(--sp-4); display: flex; flex-direction: column; flex-shrink: 0; }
+    .page-sidebar .brand { display: flex; align-items: center; gap: var(--sp-2); margin-bottom: var(--sp-6); text-decoration: none; }
+    .page-sidebar .brand-icon { font-size: 1.3rem; }
+    .page-sidebar .brand-text { font-family: var(--font-serif); font-size: var(--text-lg); font-weight: 600; color: var(--c-primary); }
+    .page-sidebar .nav-item { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-2) var(--sp-3); border-radius: var(--radius-sm); color: var(--c-text-secondary); font-size: var(--text-sm); transition: all var(--duration-fast); text-decoration: none; margin-bottom: var(--sp-1); }
+    .page-sidebar .nav-item:hover { background: var(--c-bg-warm); color: var(--c-primary); }
+    .page-sidebar .nav-item.active { background: var(--c-primary); color: var(--c-text-on-primary); }
+    .page-main { flex: 1; overflow-y: auto; padding: var(--sp-8); }
+    .form-card { background: var(--c-surface); border: 1px solid var(--c-border-light); border-radius: var(--radius-md); padding: var(--sp-6); max-width: 600px; box-shadow: var(--shadow-sm); margin-bottom: var(--sp-6); }
+    .form-card h1 { font-family: var(--font-serif); font-size: var(--text-2xl); color: var(--c-primary); margin-bottom: var(--sp-1); }
+    .form-card .subtitle { color: var(--c-text-muted); font-size: var(--text-sm); margin-bottom: var(--sp-6); }
+    .form-actions { display: flex; gap: var(--sp-3); margin-top: var(--sp-6); }
+    .doc-section { background: var(--c-surface); border: 1px solid var(--c-border-light); border-radius: var(--radius-md); padding: var(--sp-6); max-width: 600px; box-shadow: var(--shadow-sm); }
+    .doc-section h2 { font-family: var(--font-serif); font-size: var(--text-xl); color: var(--c-primary); margin-bottom: var(--sp-4); padding-bottom: var(--sp-3); border-bottom: 1px solid var(--c-border-light); }
+    .doc-item { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-3) 0; border-bottom: 1px solid var(--c-border-light); }
+    .doc-item:last-child { border-bottom: none; }
+    .doc-icon { width: 32px; height: 32px; border-radius: var(--radius-sm); display: flex; align-items: center; justify-content: center; font-size: 1rem; flex-shrink: 0; }
+    .doc-icon.pdf { background: #fdf2f2; color: var(--c-error); }
+    .doc-icon.docx { background: #f0f6fa; color: var(--c-info); }
+    .doc-icon.txt { background: var(--c-bg-warm); color: var(--c-text-secondary); }
+    .doc-name { font-size: var(--text-sm); font-weight: 500; color: var(--c-text); }
+    .doc-meta { font-size: var(--text-xs); color: var(--c-text-muted); display: flex; gap: var(--sp-3); margin-top: 2px; }
+    @media (max-width: 768px) { .page-sidebar { display: none; } .page-main { padding: var(--sp-4); } }
+</style>
+{% endblock %}
+
+{% block body %}
+<div class="page-layout">
+    <aside class="page-sidebar">
+        <a href="/" class="brand"><span class="brand-icon">&#9878;</span><span class="brand-text">法律助手</span></a>
+        <a href="/" class="nav-item">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+            对话
+        </a>
+        <a href="/upload" class="nav-item">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            文档管理
+        </a>
+        <a href="/knowledge-bases" class="nav-item active">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
+            知识库
+        </a>
+    </aside>
+
+    <main class="page-main">
+        <div class="form-card fade-in">
+            <h1>编辑知识库</h1>
+            <p class="subtitle">修改知识库的名称和描述</p>
+
+            <form method="POST" action="/knowledge-base/{{ kb.id }}/edit">
+                <div class="form-group">
+                    <label class="form-label" for="name">知识库名称</label>
+                    <input class="form-input" type="text" id="name" name="name" value="{{ kb.name }}" required>
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="description">描述</label>
+                    <textarea class="form-input" id="description" name="description" rows="4">{{ kb.description or '' }}</textarea>
+                </div>
+                <div class="form-actions">
+                    <a href="/knowledge-bases" class="btn btn-outline">取消</a>
+                    <button type="submit" class="btn btn-primary">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+                        保存更改
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <div class="doc-section fade-in fade-in-delay-1">
+            <h2>知识库中的文档</h2>
+            {% if kb.documents %}
+                {% for doc in kb.documents %}
+                <div class="doc-item">
+                    <div class="doc-icon {{ doc.file_type }}">
+                        {% if doc.file_type == 'pdf' %}&#128196;{% elif doc.file_type == 'docx' %}&#128221;{% else %}&#128203;{% endif %}
+                    </div>
+                    <div>
+                        <div class="doc-name">{{ doc.filename }}</div>
+                        <div class="doc-meta">
+                            <span>{{ doc.file_type|upper }}</span>
+                            <span>{{ "%.2f"|format(doc.file_size / 1024 / 1024) }} MB</span>
+                            <span>{{ doc.uploaded_at.strftime('%Y-%m-%d %H:%M') }}</span>
+                        </div>
+                    </div>
+                </div>
+                {% endfor %}
+            {% else %}
+                <div style="text-align:center;padding:var(--sp-6) 0;color:var(--c-text-muted);">
+                    <p>此知识库中还没有文档</p>
+                    <a href="/upload" class="btn btn-outline btn-sm" style="margin-top:var(--sp-3)">上传文档</a>
+                </div>
+            {% endif %}
+        </div>
+    </main>
+</div>
+{% endblock %}

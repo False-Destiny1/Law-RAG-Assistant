@@ -1,0 +1,35 @@
+# ── Web Framework ──
+fastapi>=0.100.0
+uvicorn>=0.20.0
+python-multipart>=0.0.6
+Jinja2>=3.1.0
+
+# ── Database ──
+SQLAlchemy>=2.0.0
+
+# ── Auth ──
+bcrypt>=4.0.0
+
+# ── Config ──
+python-dotenv>=1.0.0
+
+# ── LLM / RAG ──
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-community>=0.3.0
+langchain-openai>=0.2.0
+langchain-huggingface>=0.1.0
+langchain-text-splitters>=0.3.0
+
+# ── Embedding & Vector DB ──
+sentence-transformers>=3.0.0
+faiss-cpu>=1.7.0
+
+# ── Document Processing ──
+jieba>=0.42.0
+rank-bm25>=0.2.0
+docx2txt>=0.8
+pypdf>=3.0.0
+
+# ── Deep Learning (install torch separately for your CUDA version) ──
+# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
