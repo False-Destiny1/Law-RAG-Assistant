@@ -1,4 +1,3 @@
-from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader, TextLoader
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores.faiss import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -362,18 +361,8 @@ class DeepSeekApiRag:
         """回退到普通分块策略"""
         print(f"使用普通分块策略处理: {file_path}")
 
-        # 加载文档
-        if file_path.lower().endswith('.pdf'):
-            loader = PyPDFLoader(file_path)
-        elif file_path.lower().endswith(('.doc', '.docx')):
-            loader = Docx2txtLoader(file_path)
-        elif file_path.lower().endswith('.txt'):
-            loader = TextLoader(file_path, encoding='utf-8')
-        else:
-            print(f"不支持的文件格式: {file_path}")
-            return
-
-        pages = loader.load()
+        # 统一通过 DocumentProcessor 加载（支持 OCR 回退）
+        pages = self.document_processor._load_documents(file_path)
         documents = self.general_splitter.split_documents(pages)
         texts = [doc.page_content for doc in documents]
         self.add_documents(texts, save_to_disk=False)
@@ -386,7 +375,7 @@ class DeepSeekApiRag:
     def add_folder_documents(self, folder_path: str, save_to_disk: bool = True):
         """添加文件夹中的所有文档"""
         import time
-        supported_extensions = ('.pdf', '.doc', '.docx', '.txt')
+        supported_extensions = ('.pdf', '.doc', '.docx', '.txt', '.jpg', '.jpeg', '.png', '.bmp', '.tiff')
 
         if not os.path.exists(folder_path):
             print(f"文件夹不存在: {folder_path}")

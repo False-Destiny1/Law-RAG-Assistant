@@ -167,16 +167,8 @@ def initialize_vector_database():
                 for doc in all_docs:
                     if os.path.exists(doc.file_path):
                         try:
-                            from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader, TextLoader
-                            if doc.file_path.lower().endswith(".pdf"):
-                                loader = PyPDFLoader(doc.file_path)
-                            elif doc.file_path.lower().endswith((".doc", ".docx")):
-                                loader = Docx2txtLoader(doc.file_path)
-                            elif doc.file_path.lower().endswith(".txt"):
-                                loader = TextLoader(doc.file_path, encoding="utf-8")
-                            else:
-                                continue
-                            pages = loader.load()
+                            # 统一通过 DocumentProcessor 加载（支持 OCR 回退）
+                            pages = rag_model.document_processor._load_documents(doc.file_path)
                             documents = rag_model.text_splitter.split_documents(pages)
                             all_texts.extend([d.page_content for d in documents])
                         except Exception as e:
@@ -380,7 +372,7 @@ async def upload_submit(
     if user.role not in ["expert", "admin"]:
         raise RedirectResponse(url="/", status_code=303)
 
-    allowed_extensions = {"pdf", "docx", "txt"}
+    allowed_extensions = {"pdf", "docx", "txt", "jpg", "jpeg", "png", "bmp", "tiff"}
     file_ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
     if file_ext not in allowed_extensions:
         return RedirectResponse(url="/upload", status_code=303)

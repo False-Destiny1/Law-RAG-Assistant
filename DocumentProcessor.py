@@ -8,11 +8,12 @@ from DocumentSplitter import DocumentSplitter, GeneralDocumentSplitter
 
 
 class DocumentProcessor:
-    """文档处理器"""
+    """文档处理器（支持 OCR 预处理扫描文档）"""
 
     def __init__(self):
         self.legal_splitter = DocumentSplitter(chunk_size=400, chunk_overlap=30)
         self.general_splitter = GeneralDocumentSplitter(chunk_size=200, chunk_overlap=20)
+        self._ocr_engine = None  # 延迟加载 PaddleOCR
 
     def is_legal_document(self, file_path: str) -> bool:
         """判断是否为法律文档"""
@@ -51,18 +52,120 @@ class DocumentProcessor:
         return False
 
     def _load_file_content(self, file_path: str) -> str:
-        """加载文件内容"""
+        """加载文件内容（支持 OCR 回退）"""
         if file_path.lower().endswith('.txt'):
             loader = TextLoader(file_path, encoding='utf-8')
+            documents = loader.load()
         elif file_path.lower().endswith('.pdf'):
-            loader = PyPDFLoader(file_path)
+            try:
+                loader = PyPDFLoader(file_path)
+                documents = loader.load()
+                if self._needs_ocr(documents):
+                    print(f"[OCR] 文件内容检测文本不足，启用OCR: {file_path}")
+                    images = self._pdf_to_images(file_path)
+                    documents = self._ocr_images_to_documents(images, file_path)
+            except Exception:
+                print(f"[OCR] PDF加载失败，启用OCR: {file_path}")
+                images = self._pdf_to_images(file_path)
+                documents = self._ocr_images_to_documents(images, file_path)
         elif file_path.lower().endswith(('.doc', '.docx')):
             loader = Docx2txtLoader(file_path)
+            documents = loader.load()
+        elif file_path.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.tiff')):
+            documents = self._load_image_with_ocr(file_path)
         else:
             return ""
 
-        documents = loader.load()
         return "\n".join([doc.page_content for doc in documents])
+
+    def _get_ocr_engine(self):
+        """延迟加载 PaddleOCR 引擎"""
+        if self._ocr_engine is None:
+            try:
+                from paddleocr import PaddleOCR
+                print("[OCR] 正在初始化 PaddleOCR 引擎（首次加载较慢）...")
+                self._ocr_engine = PaddleOCR(
+                    use_doc_orientation_classify=False,
+                    use_doc_unwarping=False,
+                    use_textline_orientation=False,
+                    lang='ch'
+                )
+                print("[OCR] PaddleOCR 引擎初始化完成")
+            except ImportError:
+                raise ImportError(
+                    "需要安装 PaddleOCR 才能处理扫描文档。"
+                    "请运行: pip install paddleocr paddlepaddle"
+                )
+        return self._ocr_engine
+
+    def _needs_ocr(self, pages: list) -> bool:
+        """检测 PDF 文本层是否不足以，需要 OCR"""
+        if not pages:
+            return True
+        total_chars = sum(len(doc.page_content.strip()) for doc in pages)
+        avg_chars = total_chars / len(pages)
+        return avg_chars < 50
+
+    def _pdf_to_images(self, file_path: str) -> list:
+        """将 PDF 页面转换为 PIL Image 列表"""
+        try:
+            from pdf2image import convert_from_path
+        except ImportError:
+            raise ImportError(
+                "需要安装 pdf2image 才能处理扫描PDF。"
+                "请运行: pip install pdf2image"
+            )
+        try:
+            images = convert_from_path(file_path, dpi=200)
+            return images
+        except Exception as e:
+            raise RuntimeError(
+                f"PDF转图片失败，请确保已安装 poppler。"
+                f"Windows: conda install -c conda-forge poppler。错误: {e}"
+            )
+
+    def _ocr_images_to_documents(self, images: list, file_path: str) -> list:
+        """对图片列表执行 OCR，返回 LangChain Document 列表"""
+        import numpy as np
+        from langchain_core.documents import Document
+
+        ocr = self._get_ocr_engine()
+        documents = []
+        for i, img in enumerate(images):
+            img_array = np.array(img)
+            results = ocr.predict(img_array)
+            page_lines = []
+            for result in results:
+                if hasattr(result, 'rec_texts'):
+                    page_lines.extend(result.rec_texts)
+            page_text = "\n".join(page_lines)
+            if page_text.strip():
+                documents.append(Document(
+                    page_content=page_text,
+                    metadata={"source": file_path, "page": i}
+                ))
+            else:
+                print(f"[OCR] 警告: 第 {i + 1} 页 OCR 未识别到文本")
+        print(f"[OCR] 完成 {len(images)} 页扫描，提取 {len(documents)} 页有效文本")
+        return documents
+
+    def _load_image_with_ocr(self, file_path: str) -> list:
+        """对单张图片执行 OCR，返回 Document 列表"""
+        import numpy as np
+        from PIL import Image
+        from langchain_core.documents import Document
+
+        ocr = self._get_ocr_engine()
+        img = Image.open(file_path)
+        img_array = np.array(img)
+        results = ocr.predict(img_array)
+        lines = []
+        for result in results:
+            if hasattr(result, 'rec_texts'):
+                lines.extend(result.rec_texts)
+        text = "\n".join(lines)
+        print(f"[OCR] 图片 OCR 完成: {file_path}, 提取 {len(text)} 字符")
+        return [Document(page_content=text, metadata={"source": file_path, "page": 0})]
 
     def process_document(self, file_path: str) -> List[Dict[str, Any]]:
         """处理文档，自动识别类型并采用相应分块策略"""
@@ -106,17 +209,31 @@ class DocumentProcessor:
         return structured_chunks
 
     def _load_documents(self, file_path: str) -> List:
-        """加载文档"""
+        """加载文档（支持 OCR 回退）"""
         if file_path.lower().endswith('.txt'):
             loader = TextLoader(file_path, encoding='utf-8')
+            return loader.load()
         elif file_path.lower().endswith('.pdf'):
-            loader = PyPDFLoader(file_path)
+            # 快速路径：先尝试提取文本层
+            try:
+                loader = PyPDFLoader(file_path)
+                pages = loader.load()
+                if not self._needs_ocr(pages):
+                    return pages
+            except Exception:
+                pass  # PyPDFLoader 失败，走 OCR 路径
+
+            # 慢速路径：扫描 PDF 检测或提取失败
+            print(f"[OCR] PDF文本层不足，启用OCR: {file_path}")
+            images = self._pdf_to_images(file_path)
+            return self._ocr_images_to_documents(images, file_path)
         elif file_path.lower().endswith(('.doc', '.docx')):
             loader = Docx2txtLoader(file_path)
+            return loader.load()
+        elif file_path.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.tiff')):
+            return self._load_image_with_ocr(file_path)
         else:
             raise ValueError(f"不支持的文件格式: {file_path}")
-
-        return loader.load()
 
     def _extract_structured_articles(self, content: str) -> List[Dict[str, Any]]:
         """从文本中提取结构化的法律条款"""

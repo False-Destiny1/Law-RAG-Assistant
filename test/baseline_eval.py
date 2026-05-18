@@ -7,6 +7,7 @@ import requests
 import json
 import time
 import sys
+import os
 
 BASE_URL = "http://127.0.0.1:8080"
 
@@ -263,7 +264,7 @@ def run_evaluation():
         "results": results
     }
 
-    output_file = "baseline_results.json"
+    output_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "baseline_results.json")
     with open(output_file, "w", encoding="utf-8") as f:
         json.dump(output, f, ensure_ascii=False, indent=2)
     print(f"\n结果已保存到 {output_file}")
