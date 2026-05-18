@@ -6,12 +6,17 @@ Jinja2>=3.1.0
 
 # ── Database ──
 SQLAlchemy>=2.0.0
+psycopg2-binary>=2.9.0
 
 # ── Auth ──
 bcrypt>=4.0.0
 
 # ── Config ──
 python-dotenv>=1.0.0
+PyYAML>=6.0
+
+# ── Reranker / API ──
+dashscope>=1.17.0
 
 # ── LLM / RAG ──
 langchain>=0.3.0
@@ -22,6 +27,7 @@ langchain-huggingface>=0.1.0
 langchain-text-splitters>=0.3.0
 
 # ── Embedding & Vector DB ──
+numpy>=1.24.0
 sentence-transformers>=3.0.0
 faiss-cpu>=1.7.0
 

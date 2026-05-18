@@ -1,21 +1,30 @@
 from datetime import datetime
 from typing import List
+from collections import OrderedDict
 
 
 class ConversationMemory:
-    """对话记忆管理类（支持内存缓存 + DB 持久化回退）"""
+    """对话记忆管理类（支持内存缓存 + DB 持久化回退，LRU 淘汰）"""
+
+    MAX_CACHED_CONVERSATIONS = 500
 
     def __init__(self, max_history_turns: int = 5):
         self.max_history_turns = max_history_turns
-        self.conversations = {}
+        self.conversations = OrderedDict()
 
     def add_message(self, conversation_id: str, role: str, content: str):
-        """添加消息到对话历史（内存缓存）"""
+        """添加消息到对话历史（内存缓存 + LRU 淘汰）"""
         if conversation_id not in self.conversations:
+            # LRU 淘汰：超过上限时移除最旧的对话
+            while len(self.conversations) >= self.MAX_CACHED_CONVERSATIONS:
+                self.conversations.popitem(last=False)
             self.conversations[conversation_id] = {
                 'history': [],
                 'created_at': datetime.now()
             }
+        else:
+            # 移到末尾（最近使用）
+            self.conversations.move_to_end(conversation_id)
 
         conversation = self.conversations[conversation_id]
         conversation['history'].append({
@@ -56,6 +65,7 @@ class ConversationMemory:
 
     def _load_from_db(self, conversation_id: str) -> List[dict]:
         """从数据库加载对话历史（回退方案）"""
+        db = None
         try:
             # conversation_id 格式: "chat_{id}"
             chat_id = int(conversation_id.replace("chat_", ""))
@@ -64,7 +74,6 @@ class ConversationMemory:
             messages = db.query(Message).filter(
                 Message.chat_id == chat_id
             ).order_by(Message.created_at.desc()).limit(self.max_history_turns * 2).all()
-            db.close()
 
             if not messages:
                 return []
@@ -83,3 +92,6 @@ class ConversationMemory:
         except Exception as e:
             print(f"从DB加载对话历史失败: {e}")
             return []
+        finally:
+            if db:
+                db.close()

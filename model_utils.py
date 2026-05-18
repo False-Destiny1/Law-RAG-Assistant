@@ -7,7 +7,7 @@ import yaml
 import json
 import numpy as np
 import concurrent.futures
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from dotenv import load_dotenv
 from DocumentSplitter import DocumentSplitter, GeneralDocumentSplitter
 from BM25Retriever import BM25Retriever
@@ -163,11 +163,18 @@ class DeepSeekApiRag:
             self,
             query: str,
             documents: List[str],
-            top_k: int = 10
+            top_k: int = 10,
+            original_scores: Optional[List[float]] = None
     ) -> List[Tuple[str, float]]:
+        # 构建回退结果：使用原始融合分数而非 0.0
+        def _fallback():
+            if original_scores and len(original_scores) >= len(documents[:top_k]):
+                return list(zip(documents[:top_k], original_scores[:top_k]))
+            return [(doc, 0.0) for doc in documents[:top_k]]
+
         if not self.reranker_api_key:
             print("未设置 Reranker API 密钥，跳过重排序")
-            return [(doc, 0.0) for doc in documents[:top_k]]
+            return _fallback()
 
         try:
             from dashscope import TextReRank
@@ -190,7 +197,7 @@ class DeepSeekApiRag:
                     response = future.result(timeout=10)
                 except concurrent.futures.TimeoutError:
                     print("Reranker API 超时 (10s)，跳过重排序")
-                    return [(doc, 0.0) for doc in documents[:top_k]]
+                    return _fallback()
 
             if response.status_code == 200:
                 results = response.output.get("results", [])
@@ -205,11 +212,11 @@ class DeepSeekApiRag:
                 return reranked[:top_k]
             else:
                 print(f"Reranker 返回错误: {response.status_code} {response.output}")
-                return [(doc, 0.0) for doc in documents[:top_k]]
+                return _fallback()
 
         except Exception as e:
             print(f"Reranker 调用失败: {e}")
-            return [(doc, 0.0) for doc in documents[:top_k]]
+            return _fallback()
 
     def _embed_with_retry(self, texts: List[str], max_retries: int = 3) -> List[List[float]]:
         """带重试的嵌入生成，主模型失败自动切换回退模型"""
@@ -413,58 +420,63 @@ class DeepSeekApiRag:
         )
         print(f"向量数据库已从 {self.db_path} 加载")
 
-    def hybrid_retrieve_documents(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
-        """混合检索：向量检索 + BM25检索"""
-        all_results = []
-
-        # 1. 向量检索
+    def _vector_search(self, query: str, top_k: int) -> List[Tuple[str, float, str]]:
+        """向量检索（归一化分数）"""
+        results = []
+        if self.vector_db is None:
+            return results
         try:
-            if self.vector_db is not None:
-                vector_results = self.vector_db.similarity_search_with_score(query, k=top_k * 2)
-                # 归一化向量检索分数 (L2距离: 越小越相似，需反转)
-                vector_scores = [score for _, score in vector_results]
-                if vector_scores:
-                    max_vector_score = max(vector_scores)
-                    min_vector_score = min(vector_scores)
-                    for doc, score in vector_results:
-                        if max_vector_score != min_vector_score:
-                            normalized_score = (max_vector_score - score) / (max_vector_score - min_vector_score)
-                        else:
-                            normalized_score = 1.0
-                        all_results.append((doc.page_content, normalized_score, "vector"))
-                    print(f"向量检索返回 {len(vector_results)} 个结果")
+            vector_results = self.vector_db.similarity_search_with_score(query, k=top_k * 2)
+            vector_scores = [score for _, score in vector_results]
+            if vector_scores:
+                max_s = max(vector_scores)
+                min_s = min(vector_scores)
+                for doc, score in vector_results:
+                    normalized = (max_s - score) / (max_s - min_s) if max_s != min_s else 1.0
+                    results.append((doc.page_content, normalized, "vector"))
         except Exception as e:
             print(f"向量检索失败: {e}")
+        return results
 
-        # 2. BM25检索
+    def _bm25_search(self, query: str, top_k: int) -> List[Tuple[str, float, str]]:
+        """BM25 检索（归一化分数）"""
+        results = []
         try:
             bm25_results = self.bm25_retriever.search(query, top_k=top_k * 2)
-            # 归一化BM25分数
             bm25_scores = [score for _, score in bm25_results]
             if bm25_scores:
-                max_bm25_score = max(bm25_scores)
-                min_bm25_score = min(bm25_scores)
+                max_s = max(bm25_scores)
+                min_s = min(bm25_scores)
                 for doc, score in bm25_results:
-                    if max_bm25_score != min_bm25_score:
-                        normalized_score = (score - min_bm25_score) / (max_bm25_score - min_bm25_score)
-                    else:
-                        normalized_score = 1.0
-                    all_results.append((doc, normalized_score, "bm25"))
-                print(f"BM25检索返回 {len(bm25_results)} 个结果")
+                    normalized = (score - min_s) / (max_s - min_s) if max_s != min_s else 1.0
+                    results.append((doc, normalized, "bm25"))
         except Exception as e:
             print(f"BM25检索失败: {e}")
+        return results
 
-        # 3. 结果融合（加权融合）
+    def hybrid_retrieve_documents(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
+        """混合检索：向量检索 + BM25 检索（并行执行）"""
+        all_results = []
+
+        # 向量检索和 BM25 检索并行执行
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            vector_future = executor.submit(self._vector_search, query, top_k)
+            bm25_future = executor.submit(self._bm25_search, query, top_k)
+            all_results.extend(vector_future.result())
+            bm25_res = bm25_future.result()
+            all_results.extend(bm25_res)
+            print(f"向量检索返回 {sum(1 for _,_,m in all_results if m=='vector')} 个结果")
+            print(f"BM25检索返回 {len(bm25_res)} 个结果")
+
+        # 3. 结果融合（加权求和）
         fused_results = {}
         for doc, score, method in all_results:
+            weight = self.vector_weight if method == "vector" else self.bm25_weight
             if doc not in fused_results:
-                # 根据方法类型应用不同权重
-                weight = self.vector_weight if method == "vector" else self.bm25_weight
                 fused_results[doc] = score * weight
             else:
-                # 如果同一个文档被两种方法检索到，取加权平均
-                current_weight = self.vector_weight if method == "vector" else self.bm25_weight
-                fused_results[doc] = (fused_results[doc] + score * current_weight) / 2
+                # 同一文档被两种方法命中时累加权重（双方法命中的文档应得分更高）
+                fused_results[doc] += score * weight
 
         # 4. 排序并返回top_k
         sorted_results = sorted(fused_results.items(), key=lambda x: x[1], reverse=True)
@@ -522,10 +534,12 @@ class DeepSeekApiRag:
 
         # 按分数排序取 top candidates
         sorted_candidates = sorted(all_candidates.items(), key=lambda x: x[1], reverse=True)
-        initial_docs = [doc for doc, _ in sorted_candidates[:top_k * 3]]
+        top_candidates = sorted_candidates[:top_k * 3]
+        initial_docs = [doc for doc, _ in top_candidates]
+        initial_scores = [score for _, score in top_candidates]
 
-        # 使用 reranker 进行精细排序（用主查询做 rerank）
-        reranked_docs = self._rerank_documents(query, initial_docs, top_k=top_k)
+        # 使用 reranker 进行精细排序（用主查询做 rerank），传入原始分数用于失败回退
+        reranked_docs = self._rerank_documents(query, initial_docs, top_k=top_k, original_scores=initial_scores)
 
         # P1: 相关性过滤
         if self.relevance_threshold > 0:
@@ -554,8 +568,8 @@ class DeepSeekApiRag:
                         chunks = self.document_processor.process_document(path)
                         for c in chunks:
                             texts.add(c['full_text'])
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        print(f"知识库文档处理失败 {path}: {e}")
             self._kb_texts_cache[knowledge_base_id] = texts
             print(f"已缓存知识库 {knowledge_base_id} 的 {len(texts)} 个文本块")
             return texts

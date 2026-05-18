@@ -1,6 +1,8 @@
 import os
 import uuid
 import secrets
+import hmac
+import hashlib
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -8,8 +10,8 @@ from fastapi import FastAPI, Request, Form, UploadFile, File, Depends, HTTPExcep
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, ForeignKey
-from sqlalchemy.orm import declarative_base, sessionmaker, relationship, Session
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, ForeignKey, Index
+from sqlalchemy.orm import declarative_base, sessionmaker, relationship, Session, joinedload, subqueryload
 import bcrypt
 from dotenv import load_dotenv
 
@@ -28,7 +30,10 @@ SESSION_EXPIRE_HOURS = 24
 
 # ── Database ─────────────────────────────────────────────────────────
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///user.db")
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+if DATABASE_URL.startswith("sqlite"):
+    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+else:
+    engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
 
@@ -96,7 +101,26 @@ class UploadedDocument(Base):
     uploaded_at = Column(DateTime, default=datetime.utcnow)
 
 
+# 数据库索引（加速查询）
+Index("ix_chat_user_updated", Chat.user_id, Chat.updated_at)
+Index("ix_message_chat", Message.chat_id)
+Index("ix_kb_user", KnowledgeBase.user_id)
+Index("ix_doc_user_kb", UploadedDocument.user_id, UploadedDocument.knowledge_base_id)
+
+
 Base.metadata.create_all(engine)
+# 确保索引存在（create_all 不会更新已存在的表）
+from sqlalchemy import text as _text
+_index_sqls = [
+    'CREATE INDEX IF NOT EXISTS ix_chat_user_updated ON chat (user_id, updated_at)',
+    'CREATE INDEX IF NOT EXISTS ix_message_chat ON message (chat_id)',
+    'CREATE INDEX IF NOT EXISTS ix_kb_user ON knowledge_base (user_id)',
+    'CREATE INDEX IF NOT EXISTS ix_doc_user_kb ON uploaded_document (user_id, knowledge_base_id)',
+]
+with engine.connect() as _conn:
+    for _sql in _index_sqls:
+        _conn.execute(_text(_sql))
+    _conn.commit()
 
 
 # ── Session helpers ──────────────────────────────────────────────────
@@ -109,8 +133,9 @@ def get_db():
 
 
 def create_session_token(user_id: int) -> str:
-    payload = f"{user_id}:{secrets.token_hex(16)}:{datetime.utcnow().isoformat()}"
-    return f"{user_id}:{secrets.token_hex(32)}"
+    payload = f"{user_id}:{secrets.token_hex(16)}"
+    signature = hmac.new(SESSION_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()[:32]
+    return f"{payload}:{signature}"
 
 
 def get_current_user(request: Request, db: Session = Depends(get_db)) -> Optional[User]:
@@ -118,8 +143,14 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> Optiona
     if not token:
         return None
     try:
-        user_id = int(token.split(":")[0])
-        return db.query(User).get(user_id)
+        parts = token.split(":")
+        if len(parts) != 3:
+            return None
+        user_id_str, nonce, sig = parts
+        expected = hmac.new(SESSION_SECRET.encode(), f"{user_id_str}:{nonce}".encode(), hashlib.sha256).hexdigest()[:32]
+        if not hmac.compare_digest(sig, expected):
+            return None
+        return db.get(User, int(user_id_str))
     except (ValueError, AttributeError):
         return None
 
@@ -186,10 +217,33 @@ def initialize_vector_database():
 initialize_vector_database()
 
 
+def ensure_admin_exists():
+    """启动时确保默认管理员账号存在"""
+    db = SessionLocal()
+    try:
+        admin = db.query(User).filter(User.role == "admin").first()
+        if not admin:
+            admin_user = User(phone="admin", username="管理员", role="admin")
+            admin_user.set_password("admin123")
+            db.add(admin_user)
+            db.commit()
+            print("已创建默认管理员账号: admin / admin123")
+        else:
+            print(f"管理员账号已存在: {admin.phone}")
+    finally:
+        db.close()
+
+
+ensure_admin_exists()
+
+
 # ── Auth routes ──────────────────────────────────────────────────────
 @app.get("/login", response_class=HTMLResponse)
-def login_page(request: Request):
-    return templates.TemplateResponse(request, "login.html")
+def login_page(request: Request, registered: str = None):
+    context = {}
+    if registered:
+        context["success"] = "注册成功，请登录"
+    return templates.TemplateResponse(request, "login.html", context)
 
 
 @app.post("/login")
@@ -209,7 +263,7 @@ def login_submit(
     token = create_session_token(user.id)
     response = RedirectResponse(url="/", status_code=303)
     max_age = SESSION_EXPIRE_HOURS * 3600 if remember else None
-    response.set_cookie("session_token", token, httponly=True, max_age=max_age)
+    response.set_cookie("session_token", token, httponly=True, max_age=max_age, samesite="lax")
     return response
 
 
@@ -245,14 +299,12 @@ def register_submit(
             "errors": errors
         })
 
-    new_user = User(phone=phone, username=username, role=role)
+    new_user = User(phone=phone, username=username, role="user")
     new_user.set_password(password)
     db.add(new_user)
     db.commit()
 
-    return templates.TemplateResponse(request, "register.html", {
-        "success": "注册成功，请登录"
-    })
+    return RedirectResponse(url="/login?registered=1", status_code=303)
 
 
 @app.get("/logout")
@@ -299,7 +351,7 @@ def create_kb_submit(
 def edit_kb_page(kb_id: int, request: Request, user: User = Depends(require_user), db: Session = Depends(get_db)):
     kb = db.query(KnowledgeBase).filter(KnowledgeBase.id == kb_id, KnowledgeBase.user_id == user.id).first()
     if not kb:
-        raise RedirectResponse(url="/knowledge-bases", status_code=303)
+        return RedirectResponse(url="/knowledge-bases", status_code=303)
     return templates.TemplateResponse(request, "edit_knowledge_base.html", {
         "user": user, "kb": kb
     })
@@ -316,7 +368,7 @@ def edit_kb_submit(
 ):
     kb = db.query(KnowledgeBase).filter(KnowledgeBase.id == kb_id, KnowledgeBase.user_id == user.id).first()
     if not kb:
-        raise RedirectResponse(url="/knowledge-bases", status_code=303)
+        return RedirectResponse(url="/knowledge-bases", status_code=303)
     kb.name = name
     kb.description = description
     db.commit()
@@ -370,7 +422,7 @@ async def upload_submit(
     db: Session = Depends(get_db),
 ):
     if user.role not in ["expert", "admin"]:
-        raise RedirectResponse(url="/", status_code=303)
+        return RedirectResponse(url="/", status_code=303)
 
     allowed_extensions = {"pdf", "docx", "txt", "jpg", "jpeg", "png", "bmp", "tiff"}
     file_ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
@@ -432,7 +484,7 @@ def delete_document(doc_id: int, user: User = Depends(require_user), db: Session
 # ── API routes ───────────────────────────────────────────────────────
 @app.get("/api/chats")
 def get_chats(user: User = Depends(require_user), db: Session = Depends(get_db)):
-    chats = db.query(Chat).filter(Chat.user_id == user.id).order_by(Chat.updated_at.desc()).all()
+    chats = db.query(Chat).options(joinedload(Chat.knowledge_base)).filter(Chat.user_id == user.id).order_by(Chat.updated_at.desc()).all()
     return [{
         "id": c.id, "title": c.title,
         "created_at": c.created_at.isoformat(),
@@ -444,7 +496,7 @@ def get_chats(user: User = Depends(require_user), db: Session = Depends(get_db))
 
 @app.get("/api/chats/{chat_id}")
 def get_chat_messages(chat_id: int, user: User = Depends(require_user), db: Session = Depends(get_db)):
-    chat = db.query(Chat).filter(Chat.id == chat_id, Chat.user_id == user.id).first()
+    chat = db.query(Chat).options(joinedload(Chat.knowledge_base)).filter(Chat.id == chat_id, Chat.user_id == user.id).first()
     if not chat:
         return JSONResponse({"error": "对话不存在"}, status_code=404)
     messages = db.query(Message).filter(Message.chat_id == chat_id).order_by(Message.created_at).all()
@@ -457,16 +509,15 @@ def get_chat_messages(chat_id: int, user: User = Depends(require_user), db: Sess
 
 
 @app.post("/api/chats")
-def create_chat(request: Request, user: User = Depends(require_user), db: Session = Depends(get_db)):
-    data = request.state if hasattr(request.state, "json") else {}
+def create_chat(user: User = Depends(require_user), db: Session = Depends(get_db)):
     new_chat = Chat(user_id=user.id, title="新对话")
     db.add(new_chat)
-    db.commit()
-    db.refresh(new_chat)
+    db.flush()
 
     initial_msg = Message(chat_id=new_chat.id, role="bot", content="您好！我是智能法律助手，请问有什么可以帮您的吗？")
     db.add(initial_msg)
     db.commit()
+    db.refresh(new_chat)
 
     return {"id": new_chat.id, "title": new_chat.title, "created_at": new_chat.created_at.isoformat()}
 
@@ -510,7 +561,7 @@ def clear_chat_memory(chat_id: int, user: User = Depends(require_user), db: Sess
 
 @app.get("/api/knowledge-bases")
 def get_knowledge_bases_api(user: User = Depends(require_user), db: Session = Depends(get_db)):
-    kbs = db.query(KnowledgeBase).filter(KnowledgeBase.user_id == user.id).order_by(KnowledgeBase.updated_at.desc()).all()
+    kbs = db.query(KnowledgeBase).options(subqueryload(KnowledgeBase.documents)).filter(KnowledgeBase.user_id == user.id).order_by(KnowledgeBase.updated_at.desc()).all()
     return [{"id": k.id, "name": k.name, "description": k.description, "document_count": len(k.documents)} for k in kbs]
 
 
@@ -565,7 +616,7 @@ async def ask_stream(request: Request, user: User = Depends(require_user), db: S
             try:
                 bot_msg = Message(chat_id=int(chat_id), role="bot", content=full_response)
                 db2.add(bot_msg)
-                chat = db2.query(Chat).get(int(chat_id))
+                chat = db2.get(Chat, int(chat_id))
                 if chat:
                     chat.updated_at = datetime.utcnow()
                 db2.commit()
@@ -574,12 +625,14 @@ async def ask_stream(request: Request, user: User = Depends(require_user), db: S
 
             yield 'data: {"done": true}\n\n'
         except Exception as e:
+            import json as _json
             error_msg = f"抱歉，生成回复时出现错误: {str(e)}"
             rag_model.save_bot_response(conversation_id, error_msg)
-            yield f'data: {{"error": "{error_msg}"}}\n\n'
+            yield f'data: {_json.dumps({"error": error_msg}, ensure_ascii=False)}\n\n'
             yield 'data: {"done": true}\n\n'
 
-    return StreamingResponse(generate(), media_type="text/event-stream")
+    return StreamingResponse(generate(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 if __name__ == "__main__":
