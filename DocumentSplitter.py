@@ -53,37 +53,42 @@ class DocumentSplitter(TextSplitter):
         return chunks
 
     def _split_long_article(self, article_content: str) -> List[str]:
-        """对过长的条款进行进一步分割"""
-        # 按句号、分号等标点分割
-        sentences = re.split(r'[。；;]', article_content)
+        """对过长的条款进行进一步分割（保留原始标点）"""
+        # 按句号、分号等标点分割，使用捕获组保留分隔符
+        parts = re.split(r'([。；;])', article_content)
 
         chunks = []
         current_chunk = ""
 
-        for sentence in sentences:
-            sentence = sentence.strip()
+        for i in range(0, len(parts), 2):
+            sentence = parts[i].strip()
+            # 分隔符在 i+1 位置（如果存在）
+            delimiter = parts[i + 1] if i + 1 < len(parts) else ""
+
             if not sentence:
                 continue
 
+            # 重新组合句子和其后的分隔符
+            sentence_with_delim = sentence + delimiter
+
             # 如果当前块加上新句子不会超过限制
-            if len(current_chunk) + len(sentence) + 1 <= self._chunk_size:
-                if current_chunk:
-                    current_chunk += "。" + sentence
-                else:
-                    current_chunk = sentence
+            if len(current_chunk) + len(sentence_with_delim) <= self._chunk_size:
+                current_chunk += sentence_with_delim
             else:
-                # 保存当前块并开始新块
+                # 保存当前块并开始新块（附带上一块末尾的重叠）
                 if current_chunk:
-                    chunks.append(current_chunk + "。")
-                    current_chunk = sentence
+                    chunks.append(current_chunk)
+                    # 重叠：取上一块末尾的 N 个字符作为上下文
+                    overlap_text = current_chunk[-self._chunk_overlap:] if len(current_chunk) > self._chunk_overlap else current_chunk
+                    current_chunk = overlap_text + sentence_with_delim
                 else:
                     # 单个句子就超过限制，直接作为一个块
-                    chunks.append(sentence + "。")
+                    chunks.append(sentence_with_delim)
                     current_chunk = ""
 
         # 添加最后一个块
         if current_chunk:
-            chunks.append(current_chunk + "。")
+            chunks.append(current_chunk)
 
         return chunks
 

@@ -3,7 +3,7 @@ import uuid
 import secrets
 import hmac
 import hashlib
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import FastAPI, Request, Form, UploadFile, File, Depends, HTTPException, Response, BackgroundTasks
@@ -19,13 +19,45 @@ from model_utils import DeepSeekApiRag
 
 load_dotenv()
 
+import json as _json
+
+
+def _safe_int(value, default=None):
+    """Safely convert to int, returning default on failure."""
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return default
+
+
 # ── App ──────────────────────────────────────────────────────────────
 app = FastAPI(title="智能法律助手")
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    return response
+
+
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
 # ── Security ─────────────────────────────────────────────────────────
-SESSION_SECRET = os.getenv("SESSION_SECRET", secrets.token_hex(32))
+SESSION_SECRET = os.getenv("SESSION_SECRET")
+if not SESSION_SECRET:
+    SESSION_SECRET = secrets.token_hex(32)
+    # Persist to .env so it survives restarts
+    _env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if os.path.exists(_env_path):
+        with open(_env_path, "a", encoding="utf-8") as _f:
+            _f.write(f"\nSESSION_SECRET={SESSION_SECRET}\n")
+    print("WARNING: SESSION_SECRET not set, generated a random one (saved to .env)")
 SESSION_EXPIRE_HOURS = 24
 
 # ── Database ─────────────────────────────────────────────────────────
@@ -45,7 +77,7 @@ class User(Base):
     username = Column(String(50), nullable=False)
     password_hash = Column(String(128), nullable=False)
     role = Column(String(20), nullable=False, default="user")
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     chats = relationship("Chat", backref="user", cascade="all, delete-orphan")
     knowledge_bases = relationship("KnowledgeBase", backref="user", cascade="all, delete-orphan")
     uploaded_documents = relationship("UploadedDocument", backref="user", cascade="all, delete-orphan")
@@ -63,8 +95,8 @@ class KnowledgeBase(Base):
     user_id = Column(Integer, ForeignKey("user.id"), nullable=False)
     name = Column(String(100), nullable=False)
     description = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     documents = relationship("UploadedDocument", backref="knowledge_base", cascade="all, delete-orphan")
     chats = relationship("Chat", backref="knowledge_base")
 
@@ -74,8 +106,8 @@ class Chat(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey("user.id"), nullable=False)
     title = Column(String(100), nullable=False, default="新对话")
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     knowledge_base_id = Column(Integer, ForeignKey("knowledge_base.id"), nullable=True)
     messages = relationship("Message", backref="chat", cascade="all, delete-orphan")
 
@@ -86,7 +118,7 @@ class Message(Base):
     chat_id = Column(Integer, ForeignKey("chat.id"), nullable=False)
     role = Column(String(10), nullable=False)
     content = Column(Text, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
 class UploadedDocument(Base):
@@ -98,7 +130,7 @@ class UploadedDocument(Base):
     file_path = Column(String(512), nullable=False)
     file_type = Column(String(50), nullable=False)
     file_size = Column(Integer, nullable=False)
-    uploaded_at = Column(DateTime, default=datetime.utcnow)
+    uploaded_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
 # 数据库索引（加速查询）
@@ -263,7 +295,8 @@ def login_submit(
     token = create_session_token(user.id)
     response = RedirectResponse(url="/", status_code=303)
     max_age = SESSION_EXPIRE_HOURS * 3600 if remember else None
-    response.set_cookie("session_token", token, httponly=True, max_age=max_age, samesite="lax")
+    is_production = os.getenv("ENV", "").lower() == "production"
+    response.set_cookie("session_token", token, httponly=True, max_age=max_age, samesite="lax", secure=is_production)
     return response
 
 
@@ -279,7 +312,6 @@ def register_submit(
     username: str = Form(...),
     password: str = Form(...),
     confirm_password: str = Form(...),
-    role: str = Form("user"),
     db: Session = Depends(get_db),
 ):
     errors = []
@@ -431,13 +463,16 @@ async def upload_submit(
 
     filename = f"{uuid.uuid4()}.{file_ext}"
     file_path = os.path.join(UPLOAD_FOLDER, filename)
+    MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 50MB
     content = await file.read()
+    if len(content) > MAX_UPLOAD_SIZE:
+        return JSONResponse({"error": "文件大小超过50MB限制"}, status_code=413)
     with open(file_path, "wb") as f:
         f.write(content)
 
     new_doc = UploadedDocument(
         user_id=user.id,
-        knowledge_base_id=int(knowledge_base_id) if knowledge_base_id else None,
+        knowledge_base_id=_safe_int(knowledge_base_id),
         filename=file.filename,
         file_path=file_path,
         file_type=file_ext,
@@ -532,8 +567,14 @@ async def update_chat(chat_id: int, request: Request, user: User = Depends(requi
     if "title" in data:
         chat.title = data["title"]
     if "knowledge_base_id" in data:
-        chat.knowledge_base_id = data["knowledge_base_id"]
-    chat.updated_at = datetime.utcnow()
+        kb_id_val = data["knowledge_base_id"]
+        if kb_id_val is not None:
+            # Verify KB belongs to current user
+            kb = db.query(KnowledgeBase).filter(KnowledgeBase.id == kb_id_val, KnowledgeBase.user_id == user.id).first()
+            if not kb:
+                return JSONResponse({"error": "知识库不存在或无权访问"}, status_code=403)
+        chat.knowledge_base_id = kb_id_val
+    chat.updated_at = datetime.now(timezone.utc)
     db.commit()
 
     return {"id": chat.id, "title": chat.title, "knowledge_base_id": chat.knowledge_base_id}
@@ -582,10 +623,19 @@ async def ask_stream(request: Request, user: User = Depends(require_user), db: S
     if not user_input or not chat_id:
         return JSONResponse({"error": "缺少必要参数"}, status_code=400)
 
+    # Verify chat belongs to current user
+    try:
+        chat_id_int = int(chat_id)
+    except (ValueError, TypeError):
+        return JSONResponse({"error": "无效的对话ID"}, status_code=400)
+    chat_obj = db.query(Chat).filter(Chat.id == chat_id_int, Chat.user_id == user.id).first()
+    if not chat_obj:
+        return JSONResponse({"error": "对话不存在或无权访问"}, status_code=404)
+
     conversation_id = f"chat_{chat_id}"
 
     # P13: 直接传递 knowledge_base_id 给 RAG 模型做 metadata 过滤，不再创建临时实例
-    kb_id_int = int(kb_id) if kb_id and user.role in ["expert", "admin"] else None
+    kb_id_int = _safe_int(kb_id) if user.role in ["expert", "admin"] else None
     result = rag_model.generate_response_stream(
         user_input,
         conversation_id=conversation_id,
@@ -607,8 +657,7 @@ async def ask_stream(request: Request, user: User = Depends(require_user), db: S
             for chunk in result["stream"]:
                 content = chunk.content
                 full_response += content
-                cleaned = content.replace("\n", "\\n").replace('"', '\\"')
-                yield f'data: {{"content": "{cleaned}"}}\n\n'
+                yield f'data: {_json.dumps({"content": content}, ensure_ascii=False)}\n\n'
 
             rag_model.save_bot_response(conversation_id, full_response)
 
@@ -618,14 +667,13 @@ async def ask_stream(request: Request, user: User = Depends(require_user), db: S
                 db2.add(bot_msg)
                 chat = db2.get(Chat, int(chat_id))
                 if chat:
-                    chat.updated_at = datetime.utcnow()
+                    chat.updated_at = datetime.now(timezone.utc)
                 db2.commit()
             finally:
                 db2.close()
 
             yield 'data: {"done": true}\n\n'
         except Exception as e:
-            import json as _json
             error_msg = f"抱歉，生成回复时出现错误: {str(e)}"
             rag_model.save_bot_response(conversation_id, error_msg)
             yield f'data: {_json.dumps({"error": error_msg}, ensure_ascii=False)}\n\n'

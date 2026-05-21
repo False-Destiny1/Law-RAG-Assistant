@@ -321,6 +321,7 @@ document.addEventListener('DOMContentLoaded', function() {
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let accumulated = '';
+        let buffer = '';  // Buffer for incomplete lines across chunks
 
         // Remove loading, create streaming message
         if (loadingRow.parentNode) loadingRow.remove();
@@ -352,36 +353,43 @@ document.addEventListener('DOMContentLoaded', function() {
                     return;
                 }
 
-                const chunk = decoder.decode(value, { stream: true });
-                const lines = chunk.split('\n');
+                // Append chunk to buffer and split by newlines
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                // Keep the last incomplete line in buffer
+                buffer = lines.pop() || '';
 
                 for (const line of lines) {
                     if (!line.startsWith('data: ')) continue;
                     const data = line.slice(6).trim();
 
-                    if (data === '[DONE]' || data.includes('"done"')) {
+                    if (data === '[DONE]') {
                         contentDiv.classList.remove('streaming-cursor');
                         contentDiv.innerHTML = formatMessage(accumulated);
                         finishStreaming();
                         return;
                     }
 
-                    if (data.includes('"error"')) {
+                    // Parse JSON for done signal (precise check)
+                    if (data.startsWith('{')) {
                         try {
                             const parsed = JSON.parse(data);
-                            if (parsed.error) accumulated = parsed.error;
-                        } catch (e) { /* ignore */ }
-                        continue;
-                    }
-
-                    try {
-                        if (data.startsWith('{')) {
-                            const parsed = JSON.parse(data);
-                            if (parsed.content) accumulated += parsed.content;
-                        }
-                    } catch (e) {
-                        if (!data.includes('"done"') && !data.includes('"error"')) {
-                            accumulated += data;
+                            if (parsed.done === true) {
+                                contentDiv.classList.remove('streaming-cursor');
+                                contentDiv.innerHTML = formatMessage(accumulated);
+                                finishStreaming();
+                                return;
+                            }
+                            if (parsed.error) {
+                                accumulated = parsed.error;
+                                continue;
+                            }
+                            if (parsed.content) {
+                                accumulated += parsed.content;
+                            }
+                        } catch (e) {
+                            // Incomplete JSON, skip
+                            continue;
                         }
                     }
 

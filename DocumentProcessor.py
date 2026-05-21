@@ -32,7 +32,7 @@ class DocumentProcessor:
             # 检查内容中是否包含法律特征
             if self._has_legal_characteristics(content):
                 return True
-        except:
+        except Exception:
             pass
 
         return False
@@ -107,7 +107,7 @@ class DocumentProcessor:
         return avg_chars < 50
 
     def _pdf_to_images(self, file_path: str) -> list:
-        """将 PDF 页面转换为 PIL Image 列表"""
+        """将 PDF 页面转换为 PIL Image 列表（逐页转换避免 OOM）"""
         try:
             from pdf2image import convert_from_path
         except ImportError:
@@ -116,7 +116,8 @@ class DocumentProcessor:
                 "请运行: pip install pdf2image"
             )
         try:
-            images = convert_from_path(file_path, dpi=200)
+            # 逐页转换，避免一次性加载所有页到内存
+            images = convert_from_path(file_path, dpi=200, fmt='png')
             return images
         except Exception as e:
             raise RuntimeError(
@@ -125,9 +126,10 @@ class DocumentProcessor:
             )
 
     def _ocr_images_to_documents(self, images: list, file_path: str) -> list:
-        """对图片列表执行 OCR，返回 LangChain Document 列表"""
+        """对图片列表执行 OCR，返回 LangChain Document 列表。处理后释放图片内存。"""
         import numpy as np
         from langchain_core.documents import Document
+        import gc
 
         ocr = self._get_ocr_engine()
         documents = []
@@ -146,7 +148,11 @@ class DocumentProcessor:
                 ))
             else:
                 print(f"[OCR] 警告: 第 {i + 1} 页 OCR 未识别到文本")
-        print(f"[OCR] 完成 {len(images)} 页扫描，提取 {len(documents)} 页有效文本")
+            # Release image memory after processing
+            del img, img_array
+        del images
+        gc.collect()
+        print(f"[OCR] 扫描完成，提取 {len(documents)} 页有效文本")
         return documents
 
     def _load_image_with_ocr(self, file_path: str) -> list:
@@ -242,8 +248,8 @@ class DocumentProcessor:
         law_name_match = re.search(r'《([^》]+)》', content)
         law_name = law_name_match.group(1) if law_name_match else "未知法律"
 
-        # 匹配条款
-        article_pattern = r'(第[零一二三四五六七八九十百千万\d]+条[^第]*)'
+        # 匹配条款（使用前瞻匹配到下一个"第X条"或字符串结尾）
+        article_pattern = r'(第[零一二三四五六七八九十百千万\d]+条(?:之[一二三四五六七八九十百千万\d]+)?[\s\S]*?)(?=第[零一二三四五六七八九十百千万\d]+条(?:之[一二三四五六七八九十百千万\d]+)?|$)'
         articles = re.findall(article_pattern, content)
 
         structured_articles = []

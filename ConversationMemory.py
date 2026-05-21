@@ -1,6 +1,7 @@
 from datetime import datetime
 from typing import List
 from collections import OrderedDict
+import threading
 
 
 class ConversationMemory:
@@ -11,37 +12,40 @@ class ConversationMemory:
     def __init__(self, max_history_turns: int = 5):
         self.max_history_turns = max_history_turns
         self.conversations = OrderedDict()
+        self._lock = threading.Lock()
 
     def add_message(self, conversation_id: str, role: str, content: str):
-        """添加消息到对话历史（内存缓存 + LRU 淘汰）"""
-        if conversation_id not in self.conversations:
-            # LRU 淘汰：超过上限时移除最旧的对话
-            while len(self.conversations) >= self.MAX_CACHED_CONVERSATIONS:
-                self.conversations.popitem(last=False)
-            self.conversations[conversation_id] = {
-                'history': [],
-                'created_at': datetime.now()
-            }
-        else:
-            # 移到末尾（最近使用）
-            self.conversations.move_to_end(conversation_id)
+        """添加消息到对话历史（内存缓存 + LRU 淘汰，线程安全）"""
+        with self._lock:
+            if conversation_id not in self.conversations:
+                # LRU 淘汰：超过上限时移除最旧的对话
+                while len(self.conversations) >= self.MAX_CACHED_CONVERSATIONS:
+                    self.conversations.popitem(last=False)
+                self.conversations[conversation_id] = {
+                    'history': [],
+                    'created_at': datetime.now()
+                }
+            else:
+                # 移到末尾（最近使用）
+                self.conversations.move_to_end(conversation_id)
 
-        conversation = self.conversations[conversation_id]
-        conversation['history'].append({
-            'role': role,
-            'content': content,
-            'timestamp': datetime.now()
-        })
+            conversation = self.conversations[conversation_id]
+            conversation['history'].append({
+                'role': role,
+                'content': content,
+                'timestamp': datetime.now()
+            })
 
-        # 保留最近N轮对话
-        max_messages = self.max_history_turns * 2
-        if len(conversation['history']) > max_messages:
-            conversation['history'] = conversation['history'][-max_messages:]
+            # 保留最近N轮对话
+            max_messages = self.max_history_turns * 2
+            if len(conversation['history']) > max_messages:
+                conversation['history'] = conversation['history'][-max_messages:]
 
     def get_recent_history(self, conversation_id: str) -> List[dict]:
         """获取最近的对话历史（优先内存，回退到DB）"""
-        if conversation_id in self.conversations:
-            return self.conversations[conversation_id]['history']
+        with self._lock:
+            if conversation_id in self.conversations:
+                return list(self.conversations[conversation_id]['history'])
         # 内存没有，尝试从DB加载
         return self._load_from_db(conversation_id)
 
@@ -51,17 +55,16 @@ class ConversationMemory:
         if not history:
             return "无对话历史"
 
-        formatted = "最近的对话历史：\n"
+        parts = ["最近的对话历史：\n"]
         for i, msg in enumerate(history):
             speaker = "用户" if msg['role'] == 'user' else "助手"
-            formatted += f"{i + 1}. {speaker}: {msg['content']}\n"
-
-        return formatted
+            parts.append(f"{i + 1}. {speaker}: {msg['content']}")
+        return "\n".join(parts) + "\n"
 
     def clear_conversation(self, conversation_id: str):
         """清空特定对话的记忆"""
-        if conversation_id in self.conversations:
-            del self.conversations[conversation_id]
+        with self._lock:
+            self.conversations.pop(conversation_id, None)
 
     def _load_from_db(self, conversation_id: str) -> List[dict]:
         """从数据库加载对话历史（回退方案）"""

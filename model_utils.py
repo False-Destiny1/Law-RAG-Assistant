@@ -16,6 +16,9 @@ from DocumentProcessor import DocumentProcessor
 
 load_dotenv()
 
+# Shared thread pool for concurrent retrieval (avoids creating a new pool per query)
+_SHARED_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=8)
+
 
 class DeepSeekApiRag:
     def __init__(self, api_key: str = None, db_path: str = None):
@@ -458,15 +461,14 @@ class DeepSeekApiRag:
         """混合检索：向量检索 + BM25 检索（并行执行）"""
         all_results = []
 
-        # 向量检索和 BM25 检索并行执行
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            vector_future = executor.submit(self._vector_search, query, top_k)
-            bm25_future = executor.submit(self._bm25_search, query, top_k)
-            all_results.extend(vector_future.result())
-            bm25_res = bm25_future.result()
-            all_results.extend(bm25_res)
-            print(f"向量检索返回 {sum(1 for _,_,m in all_results if m=='vector')} 个结果")
-            print(f"BM25检索返回 {len(bm25_res)} 个结果")
+        # 向量检索和 BM25 检索并行执行（使用共享线程池）
+        vector_future = _SHARED_EXECUTOR.submit(self._vector_search, query, top_k)
+        bm25_future = _SHARED_EXECUTOR.submit(self._bm25_search, query, top_k)
+        all_results.extend(vector_future.result())
+        bm25_res = bm25_future.result()
+        all_results.extend(bm25_res)
+        print(f"向量检索返回 {sum(1 for _,_,m in all_results if m=='vector')} 个结果")
+        print(f"BM25检索返回 {len(bm25_res)} 个结果")
 
         # 3. 结果融合（加权求和）
         fused_results = {}
@@ -504,20 +506,19 @@ class DeepSeekApiRag:
         if hypothetical_doc and len(hypothetical_doc) > 20:
             search_queries.append(hypothetical_doc)
 
-        # 并行执行所有检索任务
+        # 并行执行所有检索任务（使用共享线程池）
         def _search_single(q):
             return self.hybrid_retrieve_documents(q, top_k=top_k)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(search_queries), 4)) as executor:
-            futures = {executor.submit(_search_single, q): q for q in search_queries}
-            for future in concurrent.futures.as_completed(futures):
-                try:
-                    results = future.result()
-                    for doc, score in results:
-                        if doc not in all_candidates or score > all_candidates[doc]:
-                            all_candidates[doc] = score
-                except Exception as e:
-                    print(f"子查询检索失败: {e}")
+        futures = {_SHARED_EXECUTOR.submit(_search_single, q): q for q in search_queries}
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                results = future.result()
+                for doc, score in results:
+                    if doc not in all_candidates or score > all_candidates[doc]:
+                        all_candidates[doc] = score
+            except Exception as e:
+                print(f"子查询检索失败: {e}")
 
         if not all_candidates:
             print("混合检索未返回任何结果")
@@ -607,7 +608,8 @@ class DeepSeekApiRag:
                 knowledge_base_id=knowledge_base_id,
                 db_session=db_session
             )
-        except ValueError:
+        except Exception as e:
+            print(f"文档检索失败，使用空上下文: {e}")
             retrieved_docs = []
 
         # 构建上下文（带引用编号）

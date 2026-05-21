@@ -124,68 +124,6 @@
         font-weight: 500;
     }
 
-    .role-grid {
-        display: grid;
-        grid-template-columns: repeat(3, 1fr);
-        gap: var(--sp-2);
-        margin-top: var(--sp-2);
-    }
-
-    .role-option {
-        position: relative;
-        cursor: pointer;
-    }
-
-    .role-option input {
-        position: absolute;
-        opacity: 0;
-        width: 0;
-        height: 0;
-    }
-
-    .role-card {
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        gap: var(--sp-2);
-        padding: var(--sp-3) var(--sp-2);
-        border: 1.5px solid var(--c-border);
-        border-radius: var(--radius-md);
-        transition: all var(--duration-fast);
-        text-align: center;
-    }
-
-    .role-option input:checked + .role-card {
-        border-color: var(--c-primary);
-        background: rgba(27,42,74,0.04);
-    }
-
-    .role-card:hover {
-        border-color: var(--c-primary-light);
-    }
-
-    .role-icon {
-        width: 36px;
-        height: 36px;
-        background: var(--c-bg-warm);
-        border-radius: 50%;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 1rem;
-    }
-
-    .role-option input:checked + .role-card .role-icon {
-        background: var(--c-primary);
-        color: #fff;
-    }
-
-    .role-title {
-        font-size: var(--text-xs);
-        font-weight: 500;
-        color: var(--c-text-secondary);
-    }
-
     @media (max-width: 768px) {
         .auth-hero { display: none; }
         .auth-form-panel { padding: var(--sp-6); }
@@ -242,33 +180,6 @@
                     <label class="form-label" for="confirm_password">确认密码</label>
                     <input class="form-input" type="password" id="confirm_password" name="confirm_password"
                            placeholder="再次输入密码" required>
-                </div>
-
-                <div class="form-group">
-                    <label class="form-label">用户类型</label>
-                    <div class="role-grid">
-                        <label class="role-option">
-                            <input type="radio" name="role" value="user" checked>
-                            <div class="role-card">
-                                <div class="role-icon">&#128100;</div>
-                                <div class="role-title">普通用户</div>
-                            </div>
-                        </label>
-                        <label class="role-option">
-                            <input type="radio" name="role" value="expert">
-                            <div class="role-card">
-                                <div class="role-icon">&#128188;</div>
-                                <div class="role-title">法律专家</div>
-                            </div>
-                        </label>
-                        <label class="role-option">
-                            <input type="radio" name="role" value="admin">
-                            <div class="role-card">
-                                <div class="role-icon">&#128737;</div>
-                                <div class="role-title">管理员</div>
-                            </div>
-                        </label>
-                    </div>
                 </div>
 
                 <button type="submit" class="btn btn-primary btn-block btn-lg" style="margin-top: var(--sp-4);">
