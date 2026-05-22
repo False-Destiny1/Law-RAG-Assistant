@@ -686,6 +686,21 @@ def get_knowledge_bases_api(user: User = Depends(require_user), db: Session = De
     return [{"id": k.id, "name": k.name, "description": k.description, "document_count": len(k.documents)} for k in kbs]
 
 
+@app.post("/api/retrieval-weights")
+def set_retrieval_weights(
+    vector_weight: float = Form(...),
+    bm25_weight: float = Form(...),
+    user: User = Depends(require_user),
+):
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    if vector_weight + bm25_weight <= 0:
+        raise HTTPException(status_code=400, detail="权重之和必须大于 0")
+    rag_model.vector_weight = vector_weight
+    rag_model.bm25_weight = bm25_weight
+    return {"vector_weight": vector_weight, "bm25_weight": bm25_weight}
+
+
 # ── Streaming chat ──────────────────────────────────────────────────
 @app.api_route("/ask_stream", methods=["GET", "POST"])
 async def ask_stream(request: Request, user: User = Depends(require_user), db: Session = Depends(get_db)):

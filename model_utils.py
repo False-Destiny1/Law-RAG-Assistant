@@ -614,7 +614,7 @@ class DeepSeekApiRag:
             except Exception:
                 pass
 
-    def generate_response_stream(self, query: str, conversation_id: str = None, top_k: int = 20,
+    def generate_response_stream(self, query: str, conversation_id: str = None, top_k: int = 10,
                                  prompt_name: str = "legal_advisor_prompt",
                                  knowledge_base_id: int = None, db_session=None):
         """生成RAG回答（带记忆、查询分析、HyDE、引用溯源）"""
