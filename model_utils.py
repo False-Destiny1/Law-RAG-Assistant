@@ -429,7 +429,7 @@ class DeepSeekApiRag:
         if self.vector_db is None:
             return results
         try:
-            vector_results = self.vector_db.similarity_search_with_score(query, k=top_k * 2)
+            vector_results = self.vector_db.similarity_search_with_score(query, k=int(top_k * 1.5))
             vector_scores = [score for _, score in vector_results]
             if vector_scores:
                 max_s = max(vector_scores)
@@ -445,7 +445,7 @@ class DeepSeekApiRag:
         """BM25 检索（归一化分数）"""
         results = []
         try:
-            bm25_results = self.bm25_retriever.search(query, top_k=top_k * 2)
+            bm25_results = self.bm25_retriever.search(query, top_k=int(top_k * 1.5))
             bm25_scores = [score for _, score in bm25_results]
             if bm25_scores:
                 max_s = max(bm25_scores)
@@ -483,7 +483,7 @@ class DeepSeekApiRag:
         # 4. 排序并返回top_k
         sorted_results = sorted(fused_results.items(), key=lambda x: x[1], reverse=True)
 
-        final_results = [(doc, score) for doc, score in sorted_results[:top_k * 2]]
+        final_results = [(doc, score) for doc, score in sorted_results[:int(top_k * 1.5)]]
         print(f"混合检索融合后返回 {len(final_results)} 个结果")
 
         return final_results
