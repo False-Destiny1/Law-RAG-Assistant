@@ -553,9 +553,22 @@ class DeepSeekApiRag:
         return reranked_docs
 
     def _get_knowledge_base_texts(self, knowledge_base_id: int, db_session) -> set:
-        """获取指定知识库中所有文档的文本块（带缓存）"""
+        """获取指定知识库中所有文档的文本块（L1 内存 + L2 Redis + L3 重建）"""
+        # L1: 内存缓存
         if knowledge_base_id in self._kb_texts_cache:
             return self._kb_texts_cache[knowledge_base_id]
+
+        # L2: Redis
+        try:
+            from redis_utils import cache_get_pickle
+            cached = cache_get_pickle(f"kb_texts:{knowledge_base_id}")
+            if cached is not None:
+                self._kb_texts_cache[knowledge_base_id] = cached
+                return cached
+        except Exception:
+            pass
+
+        # L3: 从 DB + 文件重建
         try:
             from app import KnowledgeBase
             kb = db_session.query(KnowledgeBase).filter(KnowledgeBase.id == knowledge_base_id).first()
@@ -572,6 +585,12 @@ class DeepSeekApiRag:
                     except Exception as e:
                         print(f"知识库文档处理失败 {path}: {e}")
             self._kb_texts_cache[knowledge_base_id] = texts
+            # Write-through to Redis
+            try:
+                from redis_utils import cache_set_pickle
+                cache_set_pickle(f"kb_texts:{knowledge_base_id}", texts, ttl=7200)
+            except Exception:
+                pass
             print(f"已缓存知识库 {knowledge_base_id} 的 {len(texts)} 个文本块")
             return texts
         except Exception as e:
@@ -579,11 +598,21 @@ class DeepSeekApiRag:
             return set()
 
     def invalidate_kb_cache(self, knowledge_base_id: int = None):
-        """文档增删后调用，清除缓存"""
+        """文档增删后调用，清除缓存（内存 + Redis）"""
         if knowledge_base_id is None:
             self._kb_texts_cache.clear()
-        elif knowledge_base_id in self._kb_texts_cache:
-            del self._kb_texts_cache[knowledge_base_id]
+            try:
+                from redis_utils import cache_delete_pattern
+                cache_delete_pattern("kb_texts:*")
+            except Exception:
+                pass
+        else:
+            self._kb_texts_cache.pop(knowledge_base_id, None)
+            try:
+                from redis_utils import cache_delete
+                cache_delete(f"kb_texts:{knowledge_base_id}")
+            except Exception:
+                pass
 
     def generate_response_stream(self, query: str, conversation_id: str = None, top_k: int = 20,
                                  prompt_name: str = "legal_advisor_prompt",

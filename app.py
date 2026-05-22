@@ -45,6 +45,55 @@ async def security_headers(request: Request, call_next):
     return response
 
 
+def _get_rate_limit_id(request: Request) -> str:
+    """从 session cookie 提取 user_id，无 cookie 时 fallback 到 IP"""
+    token = request.cookies.get("session_token")
+    if token:
+        try:
+            parts = token.split(":")
+            if len(parts) >= 2:
+                return f"user:{parts[0]}"
+        except Exception:
+            pass
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        ip = forwarded.split(",")[0].strip()
+    else:
+        ip = request.client.host if request.client else "unknown"
+    return f"ip:{ip}"
+
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    if request.url.path.startswith("/static"):
+        return await call_next(request)
+    try:
+        from redis_utils import rate_limit_check
+        identifier = _get_rate_limit_id(request)
+        path = request.url.path
+        if path.startswith("/ask_stream"):
+            limit = 30
+        elif path.startswith("/api/"):
+            limit = 60
+        elif path in ("/login", "/register") and request.method == "POST":
+            limit = 10
+        else:
+            limit = 120
+        allowed, count, remaining = rate_limit_check(identifier, limit, window=60)
+        if not allowed:
+            return JSONResponse(
+                {"error": "请求过于频繁，请稍后再试"},
+                status_code=429,
+                headers={"Retry-After": "60", "X-RateLimit-Remaining": "0"}
+            )
+        response = await call_next(request)
+        response.headers["X-RateLimit-Limit"] = str(limit)
+        response.headers["X-RateLimit-Remaining"] = str(remaining)
+        return response
+    except Exception:
+        return await call_next(request)
+
+
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
@@ -182,7 +231,38 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> Optiona
         expected = hmac.new(SESSION_SECRET.encode(), f"{user_id_str}:{nonce}".encode(), hashlib.sha256).hexdigest()[:32]
         if not hmac.compare_digest(sig, expected):
             return None
-        return db.get(User, int(user_id_str))
+
+        user_id = int(user_id_str)
+
+        # Try Redis cache first
+        try:
+            from redis_utils import cache_get_json
+            cached = cache_get_json(f"user:{user_id}")
+            if cached:
+                user = User(
+                    id=cached["id"],
+                    phone=cached["phone"],
+                    username=cached["username"],
+                    role=cached["role"],
+                )
+                return user
+        except Exception:
+            pass
+
+        # Fallback: DB query
+        user = db.get(User, user_id)
+        if user:
+            try:
+                from redis_utils import cache_set_json
+                cache_set_json(f"user:{user_id}", {
+                    "id": user.id,
+                    "phone": user.phone,
+                    "username": user.username,
+                    "role": user.role,
+                }, ttl=3600)
+            except Exception:
+                pass
+        return user
     except (ValueError, AttributeError):
         return None
 
@@ -681,6 +761,21 @@ async def ask_stream(request: Request, user: User = Depends(require_user), db: S
 
     return StreamingResponse(generate(), media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.on_event("startup")
+async def startup_event():
+    from redis_utils import is_available
+    if is_available():
+        print("Redis 连接成功")
+    else:
+        print("WARNING: Redis 不可用，使用本地缓存和数据库回退")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    from redis_utils import close_pool
+    close_pool()
 
 
 if __name__ == "__main__":

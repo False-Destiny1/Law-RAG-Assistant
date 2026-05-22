@@ -4,7 +4,7 @@
 
 基于 RAG（Retrieval-Augmented Generation）架构的智能法律问答系统，集成了用户权限管理、多格式文档解析（含 OCR）、智能问答交互、知识库动态管理等核心模块。
 
-**技术栈：** FastAPI + PostgreSQL + FAISS + BM25 + DashScope Reranker + PaddleOCR + bge-small-zh-v1.5 + MiMo LLM
+**技术栈：** FastAPI + PostgreSQL + Redis + FAISS + BM25 + DashScope Reranker + PaddleOCR + bge-small-zh-v1.5 + MiMo LLM
 
 ---
 
@@ -18,6 +18,7 @@
 - 显存 ≥ 8GB（本地嵌入模型需要 CUDA）
 - 存储 ≥ 10GB
 - PostgreSQL 16+（或使用 SQLite）
+- Redis（可选，用于缓存和限流，不安装时自动降级）
 
 **创建 Conda 环境：**
 ```bash
@@ -50,6 +51,7 @@ pip install -r requirements.txt
 | paddleocr | ≥3.5 | 扫描文档 OCR |
 | jieba | ≥0.42 | 中文分词 |
 | bcrypt | ≥4.0 | 密码加密 |
+| redis | ≥5.0 | 缓存、限流、会话管理 |
 
 **OCR 相关系统依赖：**
 ```bash
@@ -89,6 +91,9 @@ RELEVANCE_THRESHOLD=0.15
 DATABASE_URL=postgresql://postgres:密码@localhost:5432/law_assistant
 # 或 SQLite（开发用）
 # DATABASE_URL=sqlite:///user.db
+
+# ── Redis（可选）──
+REDIS_URL=redis://localhost:6379/0
 ```
 
 ### 第四步：准备数据库
@@ -149,7 +154,8 @@ law_assistant-main/
 ├── BM25Retriever.py          # BM25 关键词检索器（jieba 分词）
 ├── DocumentProcessor.py      # 文档处理器（法律/通用识别 + OCR 回退）
 ├── DocumentSplitter.py       # 文本分块器（按条款/按字符）
-├── ConversationMemory.py     # 对话记忆管理（内存缓存 + DB 回退 + LRU 淘汰）
+├── ConversationMemory.py     # 对话记忆管理（L1 内存 + L2 Redis + L3 DB，LRU 淘汰）
+├── redis_utils.py            # Redis 客户端（连接池、缓存、限流、健康检查）
 ├── prompts.yaml              # LLM 提示词模板
 │
 ├── templates/                # Jinja2 HTML 模板
@@ -238,7 +244,7 @@ FastAPI /ask_stream (SSE 流式)
 |------|------|------|
 | 用户注册/登录 | 手机号 + 密码，bcrypt 加密，HMAC 签名 session | 所有人 |
 | 智能问答 | 基于 RAG 的法律咨询，流式输出，引用溯源 | 所有人 |
-| 多轮对话 | 保留最近 5 轮对话记忆（内存缓存 + DB 回退） | 所有人 |
+| 多轮对话 | 保留最近 5 轮对话记忆（内存 + Redis + DB 三级缓存） | 所有人 |
 | 对话管理 | 创建/编辑/删除对话 | 所有人 |
 | 知识库管理 | 创建/编辑/删除知识库 | 所有人 |
 | 文档上传 | PDF/DOCX/TXT/JPG/PNG，自动向量化 | 专家/管理员 |
@@ -297,3 +303,10 @@ taskkill /F /PID <进程ID>
 ```bash
 psql -U postgres -d law_assistant -c "SELECT 1;"
 ```
+
+**Q: Redis 连接失败 / Redis 不可用**
+Redis 为可选组件，不安装时系统自动降级到本地缓存和数据库回退，功能不受影响。如需使用：
+
+- Windows：从 `e:\Redis\redis-server.exe` 启动，或使用 `start.bat` 自动启动
+- Docker：`docker run -d -p 6379:6379 redis:latest`
+- 安装后在 `.env` 中配置 `REDIS_URL=redis://localhost:6379/0`
