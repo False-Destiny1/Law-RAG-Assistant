@@ -4,7 +4,7 @@ import os
 
 from langchain_community.document_loaders import TextLoader, PyPDFLoader, Docx2txtLoader
 
-from DocumentSplitter import DocumentSplitter, GeneralDocumentSplitter
+from law_assistant.splitter import DocumentSplitter, GeneralDocumentSplitter
 
 
 class DocumentProcessor:

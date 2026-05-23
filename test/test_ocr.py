@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 def test_needs_ocr():
     """测试 _needs_ocr 检测逻辑"""
     from langchain_core.documents import Document
-    from DocumentProcessor import DocumentProcessor
+    from law_assistant.processor import DocumentProcessor
 
     proc = DocumentProcessor()
 
@@ -51,7 +51,7 @@ def test_needs_ocr():
 
 def test_ocr_engine_lazy_load():
     """测试 PaddleOCR 引擎延迟加载"""
-    from DocumentProcessor import DocumentProcessor
+    from law_assistant.processor import DocumentProcessor
 
     proc = DocumentProcessor()
     assert proc._ocr_engine is None, "初始化时 OCR 引擎应为 None"
@@ -69,7 +69,7 @@ def test_ocr_engine_lazy_load():
 
 def test_ocr_text_pdf():
     """测试文本 PDF 走快速路径（不触发 OCR）"""
-    from DocumentProcessor import DocumentProcessor
+    from law_assistant.processor import DocumentProcessor
 
     proc = DocumentProcessor()
 
@@ -93,7 +93,7 @@ def test_ocr_text_pdf():
 
 def test_legal_detection():
     """测试法律文档检测（含 OCR 回退场景）"""
-    from DocumentProcessor import DocumentProcessor
+    from law_assistant.processor import DocumentProcessor
 
     proc = DocumentProcessor()
 
@@ -116,7 +116,7 @@ def test_legal_detection():
 
 def test_process_document():
     """测试完整文档处理流程"""
-    from DocumentProcessor import DocumentProcessor
+    from law_assistant.processor import DocumentProcessor
 
     proc = DocumentProcessor()
 
@@ -139,7 +139,7 @@ def test_process_document():
 
 def test_image_ocr():
     """测试图片 OCR（需要 PaddleOCR + 测试图片）"""
-    from DocumentProcessor import DocumentProcessor
+    from law_assistant.processor import DocumentProcessor
 
     proc = DocumentProcessor()
 

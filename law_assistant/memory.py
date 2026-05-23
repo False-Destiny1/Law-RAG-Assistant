@@ -44,7 +44,7 @@ class ConversationMemory:
     def _write_to_redis(self, conversation_id: str):
         """将当前对话数据写入 Redis（调用前需已持有 self._lock 或数据已就绪）"""
         try:
-            from redis_utils import cache_set_json
+            from law_assistant.redis_utils import cache_set_json
             conversation = self.conversations.get(conversation_id)
             if conversation:
                 serializable = {
@@ -94,7 +94,7 @@ class ConversationMemory:
 
         # L2: Redis
         try:
-            from redis_utils import cache_get_json
+            from law_assistant.redis_utils import cache_get_json
             cached = cache_get_json(f"conv:{conversation_id}")
             if cached and 'history' in cached:
                 history = self._deserialize_history(cached['history'])
@@ -129,7 +129,7 @@ class ConversationMemory:
             self.conversations.pop(conversation_id, None)
         # 同步清除 Redis
         try:
-            from redis_utils import cache_delete
+            from law_assistant.redis_utils import cache_delete
             cache_delete(f"conv:{conversation_id}")
         except Exception:
             pass

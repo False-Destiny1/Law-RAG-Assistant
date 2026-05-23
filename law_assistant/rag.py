@@ -9,10 +9,10 @@ import numpy as np
 import concurrent.futures
 from typing import List, Tuple, Optional
 from dotenv import load_dotenv
-from DocumentSplitter import DocumentSplitter, GeneralDocumentSplitter
-from BM25Retriever import BM25Retriever
-from ConversationMemory import ConversationMemory
-from DocumentProcessor import DocumentProcessor
+from law_assistant.splitter import DocumentSplitter, GeneralDocumentSplitter
+from law_assistant.bm25 import BM25Retriever
+from law_assistant.memory import ConversationMemory
+from law_assistant.processor import DocumentProcessor
 
 load_dotenv()
 
@@ -560,7 +560,7 @@ class DeepSeekApiRag:
 
         # L2: Redis
         try:
-            from redis_utils import cache_get_pickle
+            from law_assistant.redis_utils import cache_get_pickle
             cached = cache_get_pickle(f"kb_texts:{knowledge_base_id}")
             if cached is not None:
                 self._kb_texts_cache[knowledge_base_id] = cached
@@ -587,7 +587,7 @@ class DeepSeekApiRag:
             self._kb_texts_cache[knowledge_base_id] = texts
             # Write-through to Redis
             try:
-                from redis_utils import cache_set_pickle
+                from law_assistant.redis_utils import cache_set_pickle
                 cache_set_pickle(f"kb_texts:{knowledge_base_id}", texts, ttl=7200)
             except Exception:
                 pass
@@ -602,14 +602,14 @@ class DeepSeekApiRag:
         if knowledge_base_id is None:
             self._kb_texts_cache.clear()
             try:
-                from redis_utils import cache_delete_pattern
+                from law_assistant.redis_utils import cache_delete_pattern
                 cache_delete_pattern("kb_texts:*")
             except Exception:
                 pass
         else:
             self._kb_texts_cache.pop(knowledge_base_id, None)
             try:
-                from redis_utils import cache_delete
+                from law_assistant.redis_utils import cache_delete
                 cache_delete(f"kb_texts:{knowledge_base_id}")
             except Exception:
                 pass

@@ -15,7 +15,7 @@ from sqlalchemy.orm import declarative_base, sessionmaker, relationship, Session
 import bcrypt
 from dotenv import load_dotenv
 
-from model_utils import DeepSeekApiRag
+from law_assistant.rag import DeepSeekApiRag
 
 load_dotenv()
 
@@ -68,7 +68,7 @@ async def rate_limit_middleware(request: Request, call_next):
     if request.url.path.startswith("/static"):
         return await call_next(request)
     try:
-        from redis_utils import rate_limit_check
+        from law_assistant.redis_utils import rate_limit_check
         identifier = _get_rate_limit_id(request)
         path = request.url.path
         if path.startswith("/ask_stream"):
@@ -236,7 +236,7 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> Optiona
 
         # Try Redis cache first
         try:
-            from redis_utils import cache_get_json
+            from law_assistant.redis_utils import cache_get_json
             cached = cache_get_json(f"user:{user_id}")
             if cached:
                 user = User(
@@ -253,7 +253,7 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> Optiona
         user = db.get(User, user_id)
         if user:
             try:
-                from redis_utils import cache_set_json
+                from law_assistant.redis_utils import cache_set_json
                 cache_set_json(f"user:{user_id}", {
                     "id": user.id,
                     "phone": user.phone,
@@ -574,7 +574,7 @@ def delete_document(doc_id: int, user: User = Depends(require_user), db: Session
         # P1: 删除前先从索引中移除该文档的内容
         try:
             if os.path.exists(doc.file_path):
-                from DocumentProcessor import DocumentProcessor
+                from law_assistant.processor import DocumentProcessor
                 processor = DocumentProcessor()
                 chunks = processor.process_document(doc.file_path)
                 texts_to_remove = [c['full_text'] for c in chunks]
@@ -780,7 +780,7 @@ async def ask_stream(request: Request, user: User = Depends(require_user), db: S
 
 @app.on_event("startup")
 async def startup_event():
-    from redis_utils import is_available
+    from law_assistant.redis_utils import is_available
     if is_available():
         print("Redis 连接成功")
     else:
@@ -789,7 +789,7 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    from redis_utils import close_pool
+    from law_assistant.redis_utils import close_pool
     close_pool()
 
 
