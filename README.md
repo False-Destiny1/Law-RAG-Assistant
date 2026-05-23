@@ -82,8 +82,8 @@ RERANKER_BASE_URL=https://dashscope.aliyuncs.com/api/v1/services/reranking/reran
 RERANKER_MODEL=gte-rerank
 
 # ── 检索权重 ──
-VECTOR_RETRIEVAL_WEIGHT=0.6
-BM25_RETRIEVAL_WEIGHT=0.4
+VECTOR_RETRIEVAL_WEIGHT=0.8
+BM25_RETRIEVAL_WEIGHT=0.2
 RELEVANCE_THRESHOLD=0.15
 
 # ── 数据库 ──
@@ -150,13 +150,16 @@ python -m uvicorn app:app --host 127.0.0.1 --port 8080
 ```
 law_assistant-main/
 ├── app.py                    # FastAPI 主应用（路由、认证、API、数据库模型）
-├── model_utils.py            # RAG 核心引擎（检索、重排序、生成、记忆）
-├── BM25Retriever.py          # BM25 关键词检索器（jieba 分词）
-├── DocumentProcessor.py      # 文档处理器（法律/通用识别 + OCR 回退）
-├── DocumentSplitter.py       # 文本分块器（按条款/按字符）
-├── ConversationMemory.py     # 对话记忆管理（L1 内存 + L2 Redis + L3 DB，LRU 淘汰）
-├── redis_utils.py            # Redis 客户端（连接池、缓存、限流、健康检查）
-├── prompts.yaml              # LLM 提示词模板
+├── law_assistant/            # 核心 Python 包
+│   ├── __init__.py           # 包导出
+│   ├── rag.py                # RAG 引擎（检索、重排序、生成、记忆）
+│   ├── bm25.py               # BM25 关键词检索器（jieba 分词）
+│   ├── processor.py          # 文档处理器（法律/通用识别 + OCR 回退）
+│   ├── splitter.py           # 文本分块器（按条款/按字符）
+│   ├── memory.py             # 对话记忆管理（L1 内存 + L2 Redis + L3 DB，LRU 淘汰）
+│   ├── redis_utils.py        # Redis 客户端（连接池、缓存、限流、健康检查）
+│   ├── security.py           # 安全模块（提示词注入检测、上下文过滤）
+│   └── prompts.yaml          # LLM 提示词模板
 │
 ├── templates/                # Jinja2 HTML 模板
 │   ├── base.html             # 基础布局
@@ -177,8 +180,8 @@ law_assistant-main/
 │
 ├── test/                     # 测试文件
 │   ├── test_ocr.py           # OCR 文档预处理测试
+│   ├── test_weights.py       # 检索权重自动测试
 │   ├── baseline_eval.py      # RAG 基准测试（需服务器运行）
-│   ├── baseline_record.md    # 历次基准测试记录
 │   └── run_all.py            # 测试运行器
 │
 ├── knowledge_base/           # 法律文本知识库（80+ 部法律全文）
@@ -187,7 +190,6 @@ law_assistant-main/
 ├── .env                      # 环境变量配置（含 API 密钥，勿提交）
 ├── requirements.txt          # 依赖清单
 ├── start.bat                 # 一键启动脚本（Windows）
-├── 项目文件详细说明.md        # 全部文件的详细说明文档
 └── README.md                 # 本文件
 ```
 
@@ -195,7 +197,6 @@ law_assistant-main/
 - `law_faiss/` — FAISS 向量索引
 - `bm25_index.pkl` — BM25 关键词索引
 - `bge-small-zh-v1.5/` — 本地嵌入模型
-- `instance/user.db` — SQLite 数据库（如使用 SQLite）
 
 ---
 
@@ -207,6 +208,8 @@ law_assistant-main/
     ▼
 FastAPI /ask_stream (SSE 流式)
     │
+    ├─── 安全检查（提示词注入检测，命中则直接拒绝）
+    │
     ├─── 查询分析（1 次 LLM 调用）
     │       ├── 多轮对话融合
     │       ├── 口语 → 法律术语改写
@@ -215,7 +218,7 @@ FastAPI /ask_stream (SSE 流式)
     │
     ├─── 并行混合检索
     │       ├── 主查询 + 子查询 + HyDE 文档
-    │       ├── 每个查询：FAISS 向量检索（权重 0.6）‖ BM25 关键词检索（权重 0.4）
+    │       ├── 每个查询：FAISS 向量检索（权重 0.8）‖ BM25 关键词检索（权重 0.2）
     │       └── 加权融合 → 候选文档
     │
     ├─── DashScope Reranker（gte-rerank）
@@ -224,9 +227,9 @@ FastAPI /ask_stream (SSE 流式)
     ├─── 知识库过滤（可选，按 knowledge_base_id）
     │
     ├─── 构建 Prompt
-    │       ├── 检索上下文（带 [来源N] 引用编号）
+    │       ├── 检索上下文（带 [来源N] 引用编号，含注入过滤）
     │       ├── 对话历史（最近 5 轮）
-    │       └── prompts.yaml 系统提示词
+    │       └── prompts.yaml 系统提示词（含安全规则）
     │
     ├─── MiMo LLM 流式生成（1 次 LLM 调用）
     │       └── SSE 逐 token 推送
@@ -251,6 +254,7 @@ FastAPI /ask_stream (SSE 流式)
 | OCR 识别 | 扫描版 PDF 和图片自动 PaddleOCR 文字识别 | 专家/管理员 |
 | 混合检索 | 向量语义 + BM25 关键词，并行执行 | 系统自动 |
 | 重排序 | DashScope Reranker 精排，超时自动回退 | 系统自动 |
+| 安全防护 | 提示词注入检测（输入过滤 + 上下文清洗 + 提示词加固） | 系统自动 |
 
 ---
 
