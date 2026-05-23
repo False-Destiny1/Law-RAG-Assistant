@@ -721,7 +721,12 @@ async def ask_stream(request: Request, user: User = Depends(require_user), db: S
 
     safe, reason = check_injection(user_input)
     if not safe:
-        return JSONResponse({"error": reason}, status_code=400)
+        import json as _inj_json
+        def _reject():
+            yield f'data: {_inj_json.dumps({"error": reason}, ensure_ascii=False)}\n\n'
+            yield 'data: {"done": true}\n\n'
+        return StreamingResponse(_reject(), media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     # Verify chat belongs to current user
     try:

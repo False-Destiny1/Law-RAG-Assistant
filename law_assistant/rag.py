@@ -619,6 +619,16 @@ class DeepSeekApiRag:
                                  prompt_name: str = "legal_advisor_prompt",
                                  knowledge_base_id: int = None, db_session=None):
         """生成RAG回答（带记忆、查询分析、HyDE、引用溯源）"""
+        # Defense-in-depth: 再次检查注入（防止其他入口绕过 app.py 层）
+        from law_assistant.security import check_injection
+        safe, reason = check_injection(query)
+        if not safe:
+            import json as _safe_json
+            def _reject():
+                yield f'data: {_safe_json.dumps({"error": reason}, ensure_ascii=False)}\n\n'
+                yield 'data: {"done": true}\n\n'
+            return {"stream": _reject(), "context": "", "retrieved_documents": [], "conversation_id": conversation_id}
+
         # 获取一次对话历史，传递给 analyze_query 避免重复查询
         conversation_history = ""
         if conversation_id:
