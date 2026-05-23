@@ -16,6 +16,7 @@ import bcrypt
 from dotenv import load_dotenv
 
 from law_assistant.rag import DeepSeekApiRag
+from law_assistant.security import check_injection
 
 load_dotenv()
 
@@ -717,6 +718,10 @@ async def ask_stream(request: Request, user: User = Depends(require_user), db: S
 
     if not user_input or not chat_id:
         return JSONResponse({"error": "缺少必要参数"}, status_code=400)
+
+    safe, reason = check_injection(user_input)
+    if not safe:
+        return JSONResponse({"error": reason}, status_code=400)
 
     # Verify chat belongs to current user
     try:

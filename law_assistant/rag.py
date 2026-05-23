@@ -13,6 +13,7 @@ from law_assistant.splitter import DocumentSplitter, GeneralDocumentSplitter
 from law_assistant.bm25 import BM25Retriever
 from law_assistant.memory import ConversationMemory
 from law_assistant.processor import DocumentProcessor
+from law_assistant.security import sanitize_context
 
 load_dotenv()
 
@@ -646,7 +647,8 @@ class DeepSeekApiRag:
 
         if retrieved_docs:
             for i, (doc, score) in enumerate(retrieved_docs):
-                context_parts.append(f"【来源{i + 1}】(相关度:{score:.2f}): {doc}")
+                safe_doc = sanitize_context(doc)
+                context_parts.append(f"【来源{i + 1}】(相关度:{score:.2f}): {safe_doc}")
 
         if conversation_history:
             context_parts.append(conversation_history)
