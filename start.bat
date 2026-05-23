@@ -8,11 +8,11 @@ echo    Law Assistant - Starting...
 echo  ========================================
 echo.
 
-set PYTHON_EXE="E:\anaconda3\envs\pytorch\python.exe"
+set "PYTHON_EXE=E:\anaconda3\envs\pytorch\python.exe"
 set "PROJECT_DIR=%~dp0"
 set HOST=127.0.0.1
 set PORT=8080
-set REDIS_EXE="E:\Redis\redis-server.exe"
+set "REDIS_EXE=E:\Redis\redis-server.exe"
 
 if not exist %PYTHON_EXE% (
     echo [ERROR] Python not found: %PYTHON_EXE%
