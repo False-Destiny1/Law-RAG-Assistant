@@ -4,7 +4,7 @@
 
 基于 RAG（Retrieval-Augmented Generation）架构的智能法律问答系统，集成了用户权限管理、多格式文档解析（含 OCR）、智能问答交互、知识库动态管理等核心模块。
 
-**技术栈：** FastAPI + PostgreSQL + Redis + FAISS + BM25 + DashScope Reranker + PaddleOCR + bge-small-zh-v1.5 + MiMo LLM
+**技术栈：** FastAPI + PostgreSQL + Redis + FAISS + BM25 + DashScope Reranker + PaddleOCR + BAAI/bge-small-zh-v1.5 + MiMo LLM
 
 ---
 
@@ -71,7 +71,7 @@ MIMO_MODEL=mimo-v2.5-pro
 
 # ── 嵌入模型（本地）──
 EMBEDDING_PROVIDER=local
-EMBEDDING_MODEL=bge-small-zh-v1.5
+EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5
 
 # ── 向量数据库 ──
 VECTOR_DB_PATH=law_faiss
@@ -129,7 +129,7 @@ python -m uvicorn app:app --host 127.0.0.1 --port 8080
 **首次启动会自动执行：**
 1. 创建数据库表和索引
 2. 创建默认管理员账号（`admin` / `admin123`）
-3. 加载 `bge-small-zh-v1.5` 嵌入模型到 GPU
+3. 加载 `BAAI/bge-small-zh-v1.5` 嵌入模型到 GPU
 4. 扫描 `knowledge_base/` 目录，构建 FAISS 向量索引和 BM25 关键词索引
 5. 保存索引到 `law_faiss/` 和 `bm25_index.pkl`
 
@@ -178,11 +178,14 @@ law_assistant-main/
 │   └── js/
 │       └── index.js          # 聊天交互逻辑（SSE 流式）
 │
-├── test/                     # 测试文件
-│   ├── test_ocr.py           # OCR 文档预处理测试
-│   ├── test_weights.py       # 检索权重自动测试
-│   ├── baseline_eval.py      # RAG 基准测试（需服务器运行）
-│   └── run_all.py            # 测试运行器
+├── tests/                    # 测试文件
+│   ├── unit/                 # 单元测试（pytest）
+│   ├── eval/                 # RAG 基准测试（需服务器运行）
+│   │   ├── baseline_eval.py
+│   │   └── run_all.py
+│   └── manual/               # 手动测试脚本
+│       ├── test_ocr.py
+│       └── test_weights.py
 │
 ├── knowledge_base/           # 法律文本知识库（80+ 部法律全文）
 ├── uploads/                  # 用户上传文档
@@ -196,7 +199,7 @@ law_assistant-main/
 **自动生成的文件（.gitignore 排除）：**
 - `law_faiss/` — FAISS 向量索引
 - `bm25_index.pkl` — BM25 关键词索引
-- `bge-small-zh-v1.5/` — 本地嵌入模型
+- `BAAI/bge-small-zh-v1.5/` — 本地嵌入模型
 
 ---
 
@@ -261,11 +264,14 @@ FastAPI /ask_stream (SSE 流式)
 ## 测试
 
 ```bash
+# 运行单元测试
+pytest tests/unit/ -v
+
 # 运行离线测试（OCR 文档处理）
-python test/run_all.py
+python tests/eval/run_all.py
 
 # 运行在线测试（需先启动服务器）
-python test/run_all.py --online
+python tests/eval/run_all.py --online
 ```
 
 ---

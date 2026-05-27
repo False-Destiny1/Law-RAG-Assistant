@@ -5,7 +5,7 @@
 ## 基准测试（改进前）
 
 > 测试时间：2026-05-15 20:42:23
-> 测试环境：本地 bge-small-zh-v1.5 + MiMo v2.5-pro + DashScope gte-rerank
+> 测试环境：本地 BAAI/bge-small-zh-v1.5 + MiMo v2.5-pro + DashScope gte-rerank
 
 | 指标 | 基准值 |
 |------|--------|

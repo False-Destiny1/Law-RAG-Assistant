@@ -3,3 +3,4 @@ from law_assistant.bm25 import BM25Retriever
 from law_assistant.memory import ConversationMemory
 from law_assistant.processor import DocumentProcessor
 from law_assistant.splitter import DocumentSplitter, GeneralDocumentSplitter
+from law_assistant.graph import LegalKnowledgeGraph

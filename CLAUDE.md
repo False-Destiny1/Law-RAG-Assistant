@@ -63,7 +63,7 @@ Total LLM calls per request: 2 (1 for query analysis, 1 for answer generation)
 
 ## Key Design Decisions
 
-- Embedding model: defaults to local `bge-small-zh-v1.5` on CUDA; can switch to DashScope API via `EMBEDDING_PROVIDER=dashscope`
+- Embedding model: defaults to local `BAAI/bge-small-zh-v1.5` on CUDA; can switch to DashScope API via `EMBEDDING_PROVIDER=dashscope`
 - BM25 uses jieba for Chinese tokenization
 - BM25 index uses lazy batch rebuild (threshold: 50 pending documents) rather than per-document updates; single file upload forces immediate rebuild
 - Session tokens are simple `user_id:random_hex` format (not JWT)

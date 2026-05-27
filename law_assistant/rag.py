@@ -10,13 +10,14 @@ import hashlib
 import logging
 import numpy as np
 import concurrent.futures
-from typing import List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional
 from dotenv import load_dotenv
 from law_assistant.splitter import DocumentSplitter, GeneralDocumentSplitter
 from law_assistant.bm25 import BM25Retriever
 from law_assistant.memory import ConversationMemory
 from law_assistant.processor import DocumentProcessor
 from law_assistant.security import sanitize_context
+from law_assistant.graph import LegalKnowledgeGraph
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +57,7 @@ class DeepSeekApiRag:
                 chunk_size=10,
             )
         else:
-            embedding_model_name = os.getenv("EMBEDDING_MODEL", "bge-small-zh-v1.5")
+            embedding_model_name = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5")
             # 支持本地路径或HuggingFace模型名
             model_path = embedding_model_name
             if not os.path.isabs(model_path) and os.path.isdir(embedding_model_name):
@@ -118,8 +119,16 @@ class DeepSeekApiRag:
         self._knowledge_base_model = None
 
         # 8. 检索权重配置
-        self.vector_weight = float(os.getenv("VECTOR_RETRIEVAL_WEIGHT", "0.6"))
-        self.bm25_weight = float(os.getenv("BM25_RETRIEVAL_WEIGHT", "0.4"))
+        self.vector_weight = float(os.getenv("VECTOR_RETRIEVAL_WEIGHT", "0.4"))
+        self.bm25_weight = float(os.getenv("BM25_RETRIEVAL_WEIGHT", "0.3"))
+        self.graph_weight = float(os.getenv("GRAPH_RETRIEVAL_WEIGHT", "0.3"))
+
+        # 9. 知识图谱（可选，Neo4j 不可用时自动降级）
+        self.knowledge_graph = LegalKnowledgeGraph()
+        if self.knowledge_graph.connect():
+            self.knowledge_graph.create_schema()
+        else:
+            logger.info("知识图谱不可用，三路融合降级为双路融合")
 
         # 9. 相关性阈值（低于此分数的检索结果会被过滤）
         self.relevance_threshold = float(os.getenv("RELEVANCE_THRESHOLD", "0.15"))
@@ -493,34 +502,58 @@ class DeepSeekApiRag:
             logger.warning(f"BM25检索失败: {e}")
         return results
 
+    def _graph_search(self, query: str, top_k: int) -> List[Tuple[str, float, str]]:
+        """图谱检索（归一化分数）"""
+        results = []
+        try:
+            graph_results = self.knowledge_graph.graph_search(query, top_k=top_k)
+            if graph_results:
+                max_s = max(score for _, score in graph_results)
+                min_s = min(score for _, score in graph_results)
+                for doc, score in graph_results:
+                    normalized = (score - min_s) / (max_s - min_s) if max_s != min_s else 1.0
+                    results.append((doc, normalized, "graph"))
+        except Exception as e:
+            logger.warning(f"图谱检索失败: {e}")
+        return results
+
     def hybrid_retrieve_documents(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
-        """混合检索：向量检索 + BM25 检索（并行执行）"""
+        """三路融合检索：向量检索 + BM25 检索 + 图谱检索（并行执行）"""
         all_results = []
 
         # 向量检索和 BM25 检索并行执行（使用共享线程池）
         vector_future = _SHARED_EXECUTOR.submit(self._vector_search, query, top_k)
         bm25_future = _SHARED_EXECUTOR.submit(self._bm25_search, query, top_k)
+        graph_future = _SHARED_EXECUTOR.submit(self._graph_search, query, top_k)
         all_results.extend(vector_future.result())
         bm25_res = bm25_future.result()
         all_results.extend(bm25_res)
+        graph_res = graph_future.result()
+        all_results.extend(graph_res)
         logger.info(f"向量检索返回 {sum(1 for _,_,m in all_results if m=='vector')} 个结果")
         logger.info(f"BM25检索返回 {len(bm25_res)} 个结果")
+        logger.info(f"图谱检索返回 {len(graph_res)} 个结果")
 
-        # 3. 结果融合（加权求和）
+        # 结果融合（加权求和）
+        weight_map = {
+            "vector": self.vector_weight,
+            "bm25": self.bm25_weight,
+            "graph": self.graph_weight,
+        }
         fused_results = {}
         for doc, score, method in all_results:
-            weight = self.vector_weight if method == "vector" else self.bm25_weight
+            weight = weight_map.get(method, 0.3)
             if doc not in fused_results:
                 fused_results[doc] = score * weight
             else:
-                # 同一文档被两种方法命中时累加权重（双方法命中的文档应得分更高）
+                # 同一文档被多种方法命中时累加权重（多方法命中的文档应得分更高）
                 fused_results[doc] += score * weight
 
-        # 4. 排序并返回top_k
+        # 排序并返回top_k
         sorted_results = sorted(fused_results.items(), key=lambda x: x[1], reverse=True)
 
         final_results = [(doc, score) for doc, score in sorted_results[:int(top_k * 1.5)]]
-        logger.info(f"混合检索融合后返回 {len(final_results)} 个结果")
+        logger.info(f"三路融合检索后返回 {len(final_results)} 个结果")
 
         return final_results
 
@@ -749,3 +782,14 @@ class DeepSeekApiRag:
     def get_bm25_document_count(self) -> int:
         """获取BM25索引中的文档数量"""
         return self.bm25_retriever.get_document_count()
+
+    def build_knowledge_graph(self, folder_path: str) -> Dict[str, int]:
+        """从文件夹批量构建知识图谱"""
+        if not self.knowledge_graph.is_available:
+            logger.warning("知识图谱不可用，无法构建")
+            return {}
+        return self.knowledge_graph.build_from_folder(folder_path)
+
+    def get_graph_stats(self) -> Dict[str, int]:
+        """获取知识图谱统计"""
+        return self.knowledge_graph.get_stats()

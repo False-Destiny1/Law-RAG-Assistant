@@ -173,7 +173,7 @@ def main():
           f"(命中率 {best['avg_hit_rate']*100:.1f}%, 耗时 {best['avg_time']:.1f}s)")
 
     # 保存完整结果
-    output_file = "test/weight_test_results.json"
+    output_file = "tests/manual/weight_test_results.json"
     with open(output_file, "w", encoding="utf-8") as f:
         json.dump(all_results, f, ensure_ascii=False, indent=2)
     print(f"\n详细结果已保存到 {output_file}")

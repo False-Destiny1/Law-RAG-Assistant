@@ -46,5 +46,8 @@ Pillow>=10.0.0
 # ── Redis ──
 redis>=5.0.0
 
+# ── Knowledge Graph (GraphRAG) ──
+neo4j>=5.0.0
+
 # ── Deep Learning (install torch separately for your CUDA version) ──
 # pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126

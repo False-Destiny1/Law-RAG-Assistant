@@ -1,8 +1,8 @@
 """
 测试运行器
 运行方式:
-  python test/run_all.py              — 运行所有离线测试
-  python test/run_all.py --online     — 包含需要服务器的在线测试
+  python tests/eval/run_all.py              — 运行所有离线测试
+  python tests/eval/run_all.py --online     — 包含需要服务器的在线测试
 """
 import sys
 import os
