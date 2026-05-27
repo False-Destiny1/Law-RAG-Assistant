@@ -1,24 +1,24 @@
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_community.vectorstores.faiss import FAISS
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_core.documents import Document
-import os
-import re
-import yaml
-import json
-import hashlib
-import logging
-import numpy as np
 import atexit
 import concurrent.futures
-from typing import Dict, List, Tuple, Optional
+import hashlib
+import json
+import logging
+import os
+import re
+
+import numpy as np
+import yaml
 from dotenv import load_dotenv
-from law_assistant.splitter import DocumentSplitter, GeneralDocumentSplitter
+from langchain_community.vectorstores.faiss import FAISS
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+
 from law_assistant.bm25 import BM25Retriever
+from law_assistant.graph import LegalKnowledgeGraph
 from law_assistant.memory import ConversationMemory
 from law_assistant.processor import DocumentProcessor
 from law_assistant.security import sanitize_context
-from law_assistant.graph import LegalKnowledgeGraph
+from law_assistant.splitter import DocumentSplitter, GeneralDocumentSplitter
 
 logger = logging.getLogger(__name__)
 
@@ -71,9 +71,7 @@ class DeepSeekApiRag:
                     model_path = local_path
             logger.info(f"使用本地嵌入模型: {model_path}")
             self.embedding_model = HuggingFaceEmbeddings(
-                model_name=model_path,
-                model_kwargs={'device': 'cuda'},
-                encode_kwargs={'normalize_embeddings': True}
+                model_name=model_path, model_kwargs={"device": "cuda"}, encode_kwargs={"normalize_embeddings": True}
             )
             self.fallback_embedding_model = None
 
@@ -165,7 +163,7 @@ class DeepSeekApiRag:
         prompts_path = os.path.join(current_dir, prompts_file)
         if not os.path.exists(prompts_path):
             raise FileNotFoundError(f"提示词文件不存在: {prompts_path}")
-        with open(prompts_path, 'r', encoding='utf-8') as file:
+        with open(prompts_path, encoding="utf-8") as file:
             prompts = yaml.safe_load(file)
         logger.info(f"已缓存 {len(prompts)} 个 prompt 模板")
         return prompts
@@ -184,19 +182,15 @@ class DeepSeekApiRag:
             formatted_prompt = prompt_template.format(**kwargs)
             return formatted_prompt
         except KeyError as e:
-            raise ValueError(f"提示词格式化错误: 缺少参数 {e}")
+            raise ValueError(f"提示词格式化错误: 缺少参数 {e}") from e
 
     def _rerank_documents(
-            self,
-            query: str,
-            documents: List[str],
-            top_k: int = 10,
-            original_scores: Optional[List[float]] = None
-    ) -> List[Tuple[str, float]]:
+        self, query: str, documents: list[str], top_k: int = 10, original_scores: list[float] | None = None
+    ) -> list[tuple[str, float]]:
         # 构建回退结果：使用原始融合分数而非 0.0
         def _fallback():
             if original_scores and len(original_scores) >= len(documents[:top_k]):
-                return list(zip(documents[:top_k], original_scores[:top_k]))
+                return list(zip(documents[:top_k], original_scores[:top_k], strict=False))
             return [(doc, 0.0) for doc in documents[:top_k]]
 
         if not self.reranker_api_key:
@@ -204,8 +198,9 @@ class DeepSeekApiRag:
             return _fallback()
 
         try:
-            from dashscope import TextReRank
             import dashscope
+            from dashscope import TextReRank
+
             dashscope.api_key = self.reranker_api_key
 
             def _call_reranker():
@@ -214,7 +209,7 @@ class DeepSeekApiRag:
                     query=query,
                     documents=documents[:20],
                     top_n=top_k,
-                    return_documents=False
+                    return_documents=False,
                 )
 
             # 超时保护：10 秒无响应则跳过重排序
@@ -245,9 +240,10 @@ class DeepSeekApiRag:
             logger.warning(f"Reranker 调用失败: {e}")
             return _fallback()
 
-    def _embed_with_retry(self, texts: List[str], max_retries: int = 3) -> List[List[float]]:
+    def _embed_with_retry(self, texts: list[str], max_retries: int = 3) -> list[list[float]]:
         """带重试的嵌入生成，主模型失败自动切换回退模型"""
         import time
+
         # 尝试主模型
         for attempt in range(max_retries):
             try:
@@ -255,7 +251,7 @@ class DeepSeekApiRag:
             except Exception as e:
                 err_str = str(e)
                 logger.warning(f"主嵌入模型错误: {err_str[:200]}")
-                wait_time = (2 ** attempt) * 2
+                wait_time = (2**attempt) * 2
                 logger.info(f"等待 {wait_time} 秒后重试 (第 {attempt + 1}/{max_retries} 次)...")
                 time.sleep(wait_time)
 
@@ -268,7 +264,7 @@ class DeepSeekApiRag:
                 except Exception as e:
                     err_str = str(e)
                     logger.warning(f"回退嵌入模型错误: {err_str[:200]}")
-                    wait_time = (2 ** attempt) * 2
+                    wait_time = (2**attempt) * 2
                     logger.info(f"等待 {wait_time} 秒后重试 (第 {attempt + 1}/{max_retries} 次)...")
                     time.sleep(wait_time)
 
@@ -289,32 +285,32 @@ class DeepSeekApiRag:
 
         try:
             prompt = self._get_prompt(
-                "query_analysis_prompt",
-                query=query,
-                conversation_history=history or "无对话历史"
+                "query_analysis_prompt", query=query, conversation_history=history or "无对话历史"
             )
             response = self.llm.invoke(prompt)
             content = response.content.strip()
             # 提取 JSON（兼容 markdown code block 包裹）
             if "```" in content:
-                match = re.search(r'\{[\s\S]*\}', content)
+                match = re.search(r"\{[\s\S]*\}", content)
                 if match:
                     content = match.group()
             result = json.loads(content)
             rewritten = result.get("rewritten_query", query)
             sub_queries = result.get("sub_queries", [rewritten])
             hypothetical = result.get("hypothetical_doc", "")
-            logger.info(f"查询分析: 原始='{query}' → 改写='{rewritten}', 子查询={len(sub_queries)}个, HyDE={'有' if hypothetical else '无'}")
+            logger.info(
+                f"查询分析: 原始='{query}' → 改写='{rewritten}', 子查询={len(sub_queries)}个, HyDE={'有' if hypothetical else '无'}"
+            )
             return {
                 "rewritten_query": rewritten if len(rewritten) > 3 else query,
                 "sub_queries": [q for q in sub_queries if len(q) > 3] or [rewritten],
-                "hypothetical_doc": hypothetical
+                "hypothetical_doc": hypothetical,
             }
         except Exception as e:
             logger.warning(f"查询分析失败，使用原始查询: {e}")
             return {"rewritten_query": query, "sub_queries": [query], "hypothetical_doc": ""}
 
-    def add_documents(self, documents: List[str], save_to_disk: bool = True):
+    def add_documents(self, documents: list[str], save_to_disk: bool = True):
         """添加文档到向量数据库和BM25索引"""
         if not documents:
             return
@@ -331,9 +327,9 @@ class DeepSeekApiRag:
 
         if self.vector_db is None:
             self.vector_db = FAISS.from_embeddings(
-                text_embeddings=list(zip(documents, embeddings_array)),
+                text_embeddings=list(zip(documents, embeddings_array, strict=False)),
                 embedding=self.embedding_model,
-                metadatas=[{} for _ in documents]
+                metadatas=[{} for _ in documents],
             )
             logger.info(f"FAISS 数据库已初始化，包含 {len(documents)} 个文档块。")
         else:
@@ -348,7 +344,9 @@ class DeepSeekApiRag:
             self.bm25_retriever.save_index()
 
         logger.info(
-            f"文档添加完成 - 向量数据库: {self.get_document_count()} 个文档, BM25索引: {self.bm25_retriever.get_document_count()} 个文档")
+            f"文档添加完成 - 向量数据库: {self.get_document_count()} 个文档, BM25索引: {self.bm25_retriever.get_document_count()} 个文档"
+        )
+
     def add_file_documents(self, file_path: str, save_to_disk: bool = True):
         """添加单个文件文档"""
         logger.info(f"正在处理文档: {file_path}")
@@ -360,10 +358,10 @@ class DeepSeekApiRag:
             # 准备添加到向量数据库的文本
             texts_to_add = []
             for chunk in structured_chunks:
-                full_text = chunk['full_text']
+                full_text = chunk["full_text"]
 
                 # 如果是法律文档且条款过长，进行分块
-                if chunk.get('metadata', {}).get('source') == 'legal_document' and len(full_text) > 500:
+                if chunk.get("metadata", {}).get("source") == "legal_document" and len(full_text) > 500:
                     legal_splitter = DocumentSplitter(chunk_size=400, chunk_overlap=30)
                     sub_chunks = legal_splitter.split_text(full_text)
                     texts_to_add.extend(sub_chunks)
@@ -405,7 +403,8 @@ class DeepSeekApiRag:
     def add_folder_documents(self, folder_path: str, save_to_disk: bool = True):
         """添加文件夹中的所有文档"""
         import time
-        supported_extensions = ('.pdf', '.doc', '.docx', '.txt', '.jpg', '.jpeg', '.png', '.bmp', '.tiff')
+
+        supported_extensions = (".pdf", ".doc", ".docx", ".txt", ".jpg", ".jpeg", ".png", ".bmp", ".tiff")
 
         if not os.path.exists(folder_path):
             logger.warning(f"文件夹不存在: {folder_path}")
@@ -434,8 +433,8 @@ class DeepSeekApiRag:
         for fname in sorted(os.listdir(self.db_path)):
             fpath = os.path.join(self.db_path, fname)
             if os.path.isfile(fpath) and fname != ".hash":
-                with open(fpath, 'rb') as f:
-                    for chunk in iter(lambda: f.read(8192), b''):
+                with open(fpath, "rb") as f:
+                    for chunk in iter(lambda: f.read(8192), b""):
                         hash_sha256.update(chunk)
         return hash_sha256.hexdigest()
 
@@ -443,7 +442,7 @@ class DeepSeekApiRag:
         """保存 FAISS 索引的完整性哈希"""
         hash_file = os.path.join(self.db_path, ".hash")
         digest = self._compute_faiss_hash()
-        with open(hash_file, 'w') as f:
+        with open(hash_file, "w") as f:
             f.write(digest)
 
     def _verify_faiss_hash(self) -> bool:
@@ -452,7 +451,7 @@ class DeepSeekApiRag:
         if not os.path.exists(hash_file):
             logger.info("FAISS 索引无哈希文件，跳过完整性校验")
             return True
-        with open(hash_file, 'r') as f:
+        with open(hash_file) as f:
             expected = f.read().strip()
         actual = self._compute_faiss_hash()
         return expected == actual
@@ -468,14 +467,10 @@ class DeepSeekApiRag:
         """从本地加载向量数据库（先校验文件完整性）"""
         if not self._verify_faiss_hash():
             raise RuntimeError(f"FAISS 索引文件完整性校验失败: {self.db_path}，文件可能被篡改")
-        self.vector_db = FAISS.load_local(
-            self.db_path,
-            self.embedding_model,
-            allow_dangerous_deserialization=True
-        )
+        self.vector_db = FAISS.load_local(self.db_path, self.embedding_model, allow_dangerous_deserialization=True)
         logger.info(f"向量数据库已从 {self.db_path} 加载")
 
-    def _vector_search(self, query: str, top_k: int) -> List[Tuple[str, float, str]]:
+    def _vector_search(self, query: str, top_k: int) -> list[tuple[str, float, str]]:
         """向量检索（归一化分数）"""
         results = []
         if self.vector_db is None:
@@ -493,7 +488,7 @@ class DeepSeekApiRag:
             logger.warning(f"向量检索失败: {e}")
         return results
 
-    def _bm25_search(self, query: str, top_k: int) -> List[Tuple[str, float, str]]:
+    def _bm25_search(self, query: str, top_k: int) -> list[tuple[str, float, str]]:
         """BM25 检索（归一化分数）"""
         results = []
         try:
@@ -509,7 +504,7 @@ class DeepSeekApiRag:
             logger.warning(f"BM25检索失败: {e}")
         return results
 
-    def _graph_search(self, query: str, top_k: int) -> List[Tuple[str, float, str]]:
+    def _graph_search(self, query: str, top_k: int) -> list[tuple[str, float, str]]:
         """图谱检索（归一化分数）"""
         results = []
         try:
@@ -524,7 +519,7 @@ class DeepSeekApiRag:
             logger.warning(f"图谱检索失败: {e}")
         return results
 
-    def hybrid_retrieve_documents(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
+    def hybrid_retrieve_documents(self, query: str, top_k: int = 10) -> list[tuple[str, float]]:
         """三路融合检索：向量检索 + BM25 检索 + 图谱检索（顺序执行，外层 retrieve_documents 已并行）"""
         all_results = []
 
@@ -563,16 +558,20 @@ class DeepSeekApiRag:
         # 排序并返回top_k
         sorted_results = sorted(fused_results.items(), key=lambda x: x[1], reverse=True)
 
-        final_results = [(doc, score) for doc, score in sorted_results[:int(top_k * 1.5)]]
+        final_results = [(doc, score) for doc, score in sorted_results[: int(top_k * 1.5)]]
         logger.info(f"三路融合检索后返回 {len(final_results)} 个结果")
 
         return final_results
 
-    def retrieve_documents(self, query: str, top_k: int = 10,
-                           sub_queries: List[str] = None,
-                           hypothetical_doc: str = "",
-                           knowledge_base_id: int = None,
-                           db_session=None) -> List[Tuple[str, float]]:
+    def retrieve_documents(
+        self,
+        query: str,
+        top_k: int = 10,
+        sub_queries: list[str] = None,
+        hypothetical_doc: str = "",
+        knowledge_base_id: int = None,
+        db_session=None,
+    ) -> list[tuple[str, float]]:
         """混合检索 + 多子查询并行 + HyDE + 重排序 + 相关性过滤"""
         # 收集所有候选文档（去重）
         all_candidates = {}
@@ -615,7 +614,7 @@ class DeepSeekApiRag:
 
         # 按分数排序取 top candidates
         sorted_candidates = sorted(all_candidates.items(), key=lambda x: x[1], reverse=True)
-        top_candidates = sorted_candidates[:top_k * 3]
+        top_candidates = sorted_candidates[: top_k * 3]
         initial_docs = [doc for doc, _ in top_candidates]
         initial_scores = [score for _, score in top_candidates]
 
@@ -641,6 +640,7 @@ class DeepSeekApiRag:
         # L2: Redis
         try:
             from law_assistant.redis_utils import cache_get_set
+
             cached = cache_get_set(f"kb_texts:{knowledge_base_id}")
             if cached is not None:
                 self._kb_texts_cache[knowledge_base_id] = cached
@@ -664,9 +664,9 @@ class DeepSeekApiRag:
                     try:
                         chunks = self.document_processor.process_document(path)
                         for c in chunks:
-                            full_text = c['full_text']
+                            full_text = c["full_text"]
                             # Apply same sub-splitting as add_file_documents
-                            if c.get('metadata', {}).get('source') == 'legal_document' and len(full_text) > 500:
+                            if c.get("metadata", {}).get("source") == "legal_document" and len(full_text) > 500:
                                 legal_splitter = DocumentSplitter(chunk_size=400, chunk_overlap=30)
                                 sub_chunks = legal_splitter.split_text(full_text)
                                 for sc in sub_chunks:
@@ -679,6 +679,7 @@ class DeepSeekApiRag:
             # Write-through to Redis
             try:
                 from law_assistant.redis_utils import cache_set_set
+
                 cache_set_set(f"kb_texts:{knowledge_base_id}", texts, ttl=7200)
             except Exception as e:
                 logger.warning(f"Redis 缓存写入失败 (kb_texts:{knowledge_base_id}): {e}")
@@ -703,6 +704,7 @@ class DeepSeekApiRag:
             self._kb_texts_cache.clear()
             try:
                 from law_assistant.redis_utils import cache_delete_pattern
+
                 cache_delete_pattern("kb_texts:*")
             except Exception as e:
                 logger.warning(f"Redis 缓存清除失败 (kb_texts:*): {e}")
@@ -710,22 +712,32 @@ class DeepSeekApiRag:
             self._kb_texts_cache.pop(knowledge_base_id, None)
             try:
                 from law_assistant.redis_utils import cache_delete
+
                 cache_delete(f"kb_texts:{knowledge_base_id}")
             except Exception as e:
                 logger.warning(f"Redis 缓存清除失败 (kb_texts:{knowledge_base_id}): {e}")
 
-    def generate_response_stream(self, query: str, conversation_id: str = None, top_k: int = 10,
-                                 prompt_name: str = "legal_advisor_prompt",
-                                 knowledge_base_id: int = None, db_session=None):
+    def generate_response_stream(
+        self,
+        query: str,
+        conversation_id: str = None,
+        top_k: int = 10,
+        prompt_name: str = "legal_advisor_prompt",
+        knowledge_base_id: int = None,
+        db_session=None,
+    ):
         """生成RAG回答（带记忆、查询分析、HyDE、引用溯源）"""
         # Defense-in-depth: 再次检查注入（防止其他入口绕过 app.py 层）
         from law_assistant.security import check_injection
+
         safe, reason = check_injection(query)
         if not safe:
             import json as _safe_json
+
             def _reject():
-                yield f'data: {_safe_json.dumps({"error": reason}, ensure_ascii=False)}\n\n'
+                yield f"data: {_safe_json.dumps({'error': reason}, ensure_ascii=False)}\n\n"
                 yield 'data: {"done": true}\n\n'
+
             return {"stream": _reject(), "context": "", "retrieved_documents": [], "conversation_id": conversation_id}
 
         # 获取一次对话历史，传递给 analyze_query 避免重复查询
@@ -745,7 +757,7 @@ class DeepSeekApiRag:
                 sub_queries=analysis["sub_queries"],
                 hypothetical_doc=analysis["hypothetical_doc"],
                 knowledge_base_id=knowledge_base_id,
-                db_session=db_session
+                db_session=db_session,
             )
         except Exception as e:
             logger.warning(f"文档检索失败，使用空上下文: {e}")
@@ -761,29 +773,24 @@ class DeepSeekApiRag:
 
         context = "\n\n".join(context_parts) if context_parts else "无相关上下文"
 
-        prompt = self._get_prompt(
-            prompt_name,
-            query=query,
-            context=context,
-            conversation_history=conversation_history
-        )
+        prompt = self._get_prompt(prompt_name, query=query, context=context, conversation_history=conversation_history)
 
         response_stream = self.llm.stream(prompt)
 
         if conversation_id:
-            self.memory.add_message(conversation_id, 'user', query)
+            self.memory.add_message(conversation_id, "user", query)
 
         return {
             "stream": response_stream,
             "context": context,
             "retrieved_documents": [doc[0] for doc in retrieved_docs],
-            "conversation_id": conversation_id
+            "conversation_id": conversation_id,
         }
 
     def save_bot_response(self, conversation_id: str, response: str):
         """保存AI回复到记忆"""
         if conversation_id:
-            self.memory.add_message(conversation_id, 'assistant', response)
+            self.memory.add_message(conversation_id, "assistant", response)
 
     def clear_conversation_memory(self, conversation_id: str):
         """清空特定对话的记忆"""
@@ -793,19 +800,19 @@ class DeepSeekApiRag:
         """获取向量数据库中的文档数量"""
         if self.vector_db is None:
             return 0
-        return self.vector_db.index.ntotal if hasattr(self.vector_db.index, 'ntotal') else 0
+        return self.vector_db.index.ntotal if hasattr(self.vector_db.index, "ntotal") else 0
 
     def get_bm25_document_count(self) -> int:
         """获取BM25索引中的文档数量"""
         return self.bm25_retriever.get_document_count()
 
-    def build_knowledge_graph(self, folder_path: str) -> Dict[str, int]:
+    def build_knowledge_graph(self, folder_path: str) -> dict[str, int]:
         """从文件夹批量构建知识图谱"""
         if not self.knowledge_graph.is_available:
             logger.warning("知识图谱不可用，无法构建")
             return {}
         return self.knowledge_graph.build_from_folder(folder_path)
 
-    def get_graph_stats(self) -> Dict[str, int]:
+    def get_graph_stats(self) -> dict[str, int]:
         """获取知识图谱统计"""
         return self.knowledge_graph.get_stats()

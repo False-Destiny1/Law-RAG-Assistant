@@ -3,8 +3,9 @@ OCR 文档预处理测试脚本
 测试 DocumentProcessor 的 OCR 回退逻辑，无需启动服务器。
 运行: cd test && python test_ocr.py
 """
-import sys
+
 import os
+import sys
 
 # 添加项目根目录到 path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -13,6 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 def test_needs_ocr():
     """测试 _needs_ocr 检测逻辑"""
     from langchain_core.documents import Document
+
     from law_assistant.processor import DocumentProcessor
 
     proc = DocumentProcessor()
@@ -34,7 +36,7 @@ def test_needs_ocr():
     # 混合情况：平均不足
     pages_mixed = [
         Document(page_content="a" * 100),  # 100 chars
-        Document(page_content=""),           # 0 chars
+        Document(page_content=""),  # 0 chars
     ]
     # avg = 50, 不 < 50, 所以不需要 OCR
     assert proc._needs_ocr(pages_mixed) is False, "平均刚好50应返回 False"
@@ -79,7 +81,7 @@ def test_ocr_text_pdf():
         print("[SKIP] test_ocr_text_pdf — knowledge_base 目录不存在")
         return
 
-    txt_files = [f for f in os.listdir(kb_dir) if f.endswith('.txt')]
+    txt_files = [f for f in os.listdir(kb_dir) if f.endswith(".txt")]
     if not txt_files:
         print("[SKIP] test_ocr_text_pdf — 无测试文件")
         return
@@ -103,7 +105,7 @@ def test_legal_detection():
         return
 
     # 文件名包含"法"的应被检测为法律文档
-    law_files = [f for f in os.listdir(kb_dir) if '法' in f]
+    law_files = [f for f in os.listdir(kb_dir) if "法" in f]
     if not law_files:
         print("[SKIP] test_legal_detection — 无法律文件")
         return
@@ -125,7 +127,7 @@ def test_process_document():
         print("[SKIP] test_process_document — knowledge_base 目录不存在")
         return
 
-    txt_files = [f for f in os.listdir(kb_dir) if f.endswith('.txt')]
+    txt_files = [f for f in os.listdir(kb_dir) if f.endswith(".txt")]
     if not txt_files:
         print("[SKIP] test_process_document — 无测试文件")
         return
@@ -133,7 +135,7 @@ def test_process_document():
     test_file = os.path.join(kb_dir, txt_files[0])
     result = proc.process_document(test_file)
     assert len(result) > 0, "应处理出至少一个块"
-    assert 'full_text' in result[0], "结果应包含 full_text 字段"
+    assert "full_text" in result[0], "结果应包含 full_text 字段"
     print(f"[PASS] test_process_document — {txt_files[0]}: 处理出 {len(result)} 个块")
 
 
@@ -145,16 +147,15 @@ def test_image_ocr():
 
     # 创建一个简单的测试图片
     try:
-        from PIL import Image, ImageDraw, ImageFont
-        import numpy as np
+        from PIL import Image, ImageDraw
     except ImportError:
         print("[SKIP] test_image_ocr — Pillow 未安装")
         return
 
     test_img_path = os.path.join(os.path.dirname(__file__), "test_image.png")
-    img = Image.new('RGB', (400, 100), color='white')
+    img = Image.new("RGB", (400, 100), color="white")
     draw = ImageDraw.Draw(img)
-    draw.text((10, 30), "中华人民共和国法律测试", fill='black')
+    draw.text((10, 30), "中华人民共和国法律测试", fill="black")
     img.save(test_img_path)
 
     try:

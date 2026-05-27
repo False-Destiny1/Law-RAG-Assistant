@@ -1,8 +1,7 @@
-import os
 import json
 import logging
+import os
 import threading
-from typing import List, Tuple
 
 import jieba
 from rank_bm25 import BM25Okapi
@@ -22,11 +21,11 @@ class BM25Retriever:
         self.rebuild_threshold = rebuild_threshold  # 积累多少文档后重建索引
         self._lock = threading.Lock()  # 保护 pending_documents 和索引状态
 
-    def chinese_tokenize(self, text: str) -> List[str]:
+    def chinese_tokenize(self, text: str) -> list[str]:
         """中文分词"""
         return list(jieba.cut(text))
 
-    def build_index(self, documents: List[str]):
+    def build_index(self, documents: list[str]):
         """构建BM25索引（完整重建，线程安全）"""
         if not documents:
             return
@@ -44,7 +43,7 @@ class BM25Retriever:
             self.bm25 = bm25
         logger.info("BM25索引构建完成")
 
-    def add_documents(self, new_documents: List[str], force_rebuild: bool = False):
+    def add_documents(self, new_documents: list[str], force_rebuild: bool = False):
         """添加文档（智能批量处理，线程安全）"""
         if not new_documents:
             return
@@ -55,9 +54,7 @@ class BM25Retriever:
             logger.info(f"已缓存 {len(new_documents)} 个文档，待处理文档总数: {len(self.pending_documents)}")
 
             # 判断是否需要重建索引
-            should_rebuild = (force_rebuild or
-                              len(self.pending_documents) >= self.rebuild_threshold or
-                              self.bm25 is None)
+            should_rebuild = force_rebuild or len(self.pending_documents) >= self.rebuild_threshold or self.bm25 is None
 
         if should_rebuild:
             self._rebuild_with_pending()
@@ -89,7 +86,7 @@ class BM25Retriever:
         """强制立即重建索引"""
         self._rebuild_with_pending()
 
-    def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
+    def search(self, query: str, top_k: int = 10) -> list[tuple[str, float]]:
         """BM25检索 — 线程安全"""
         with self._lock:
             if self.bm25 is None or not self.documents:
@@ -113,7 +110,7 @@ class BM25Retriever:
             documents = self.documents
 
         # 获取top_k结果
-        doc_scores = list(zip(documents, scores))
+        doc_scores = list(zip(documents, scores, strict=False))
         doc_scores.sort(key=lambda x: x[1], reverse=True)
 
         return doc_scores[:top_k]
@@ -124,11 +121,8 @@ class BM25Retriever:
             self._rebuild_with_pending()
 
         if self.bm25 is not None:
-            with open(self.bm25_index_path, 'w', encoding='utf-8') as f:
-                json.dump({
-                    'documents': self.documents,
-                    'tokenized_docs': self.tokenized_docs
-                }, f, ensure_ascii=False)
+            with open(self.bm25_index_path, "w", encoding="utf-8") as f:
+                json.dump({"documents": self.documents, "tokenized_docs": self.tokenized_docs}, f, ensure_ascii=False)
             logger.info(f"BM25索引已保存到: {self.bm25_index_path}")
 
     def load_index(self) -> bool:
@@ -137,10 +131,10 @@ class BM25Retriever:
             return False
 
         try:
-            with open(self.bm25_index_path, 'r', encoding='utf-8') as f:
+            with open(self.bm25_index_path, encoding="utf-8") as f:
                 data = json.load(f)
-            self.documents = data['documents']
-            self.tokenized_docs = data['tokenized_docs']
+            self.documents = data["documents"]
+            self.tokenized_docs = data["tokenized_docs"]
             self.bm25 = BM25Okapi(self.tokenized_docs) if self.tokenized_docs else None
             self.pending_documents = []
             logger.info(f"BM25索引已从 {self.bm25_index_path} 加载，文档数: {len(self.documents)}")
@@ -153,7 +147,7 @@ class BM25Retriever:
         """获取总文档数量（包含待处理文档）"""
         return len(self.documents) + len(self.pending_documents)
 
-    def remove_documents(self, target_texts: List[str]):
+    def remove_documents(self, target_texts: list[str]):
         """从索引中移除包含指定文本的文档（线程安全）"""
         with self._lock:
             if not self.documents:

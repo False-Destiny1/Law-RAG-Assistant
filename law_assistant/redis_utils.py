@@ -1,11 +1,11 @@
-import os
 import json
 import logging
+import os
 import threading
-from datetime import datetime
-from typing import Optional, Any
-from functools import wraps
 from collections import defaultdict
+from datetime import datetime
+from functools import wraps
+from typing import Any
 
 import redis
 from dotenv import load_dotenv
@@ -15,8 +15,8 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 # --- Connection Pool (lazy singleton, thread-safe) ---
-_pool: Optional[redis.ConnectionPool] = None
-_redis_client: Optional[redis.Redis] = None
+_pool: redis.ConnectionPool | None = None
+_redis_client: redis.Redis | None = None
 _redis_lock = threading.Lock()
 
 # --- Local rate limiting fallback (when Redis is unavailable) ---
@@ -27,7 +27,7 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 KEY_PREFIX = "law_assistant"
 
 
-def _get_client() -> Optional[redis.Redis]:
+def _get_client() -> redis.Redis | None:
     """Get or create the Redis client (thread-safe via double-checked locking)."""
     global _pool, _redis_client
     if _redis_client is not None:
@@ -60,6 +60,7 @@ def _key(suffix: str) -> str:
 
 def redis_fallback(default=None):
     """Decorator: if Redis call raises, log warning and return default."""
+
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
@@ -68,14 +69,17 @@ def redis_fallback(default=None):
             except Exception as e:
                 logger.warning(f"Redis error in {func.__name__}: {e}")
                 return default
+
         return wrapper
+
     return decorator
 
 
 # --- Generic JSON helpers ---
 
+
 @redis_fallback(None)
-def cache_get_json(key: str) -> Optional[Any]:
+def cache_get_json(key: str) -> Any | None:
     client = _get_client()
     if client is None:
         return None
@@ -118,8 +122,9 @@ def cache_delete_pattern(pattern: str):
 
 # --- JSON helpers for complex objects (replaces pickle for security) ---
 
+
 @redis_fallback(None)
-def cache_get_set(key: str) -> Optional[set]:
+def cache_get_set(key: str) -> set | None:
     """Load a set stored as a JSON array. Returns None on miss."""
     client = _get_client()
     if client is None:
@@ -140,6 +145,7 @@ def cache_set_set(key: str, value: set, ttl: int = 3600):
 
 
 # --- Rate limiting ---
+
 
 def rate_limit_check(identifier: str, limit: int, window: int = 60):
     """
@@ -187,6 +193,7 @@ def rate_limit_check(identifier: str, limit: int, window: int = 60):
 
 
 # --- Health check ---
+
 
 def is_available() -> bool:
     try:

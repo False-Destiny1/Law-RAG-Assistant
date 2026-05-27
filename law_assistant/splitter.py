@@ -1,6 +1,6 @@
-from langchain_text_splitters import TextSplitter, RecursiveCharacterTextSplitter
-from typing import List
 import re
+
+from langchain_text_splitters import RecursiveCharacterTextSplitter, TextSplitter
 
 
 class DocumentSplitter(TextSplitter):
@@ -9,21 +9,17 @@ class DocumentSplitter(TextSplitter):
     def __init__(self, chunk_size: int = 500, chunk_overlap: int = 50):
         super().__init__(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
 
-    def split_text(self, text: str) -> List[str]:
+    def split_text(self, text: str) -> list[str]:
         """按法律条款分割文本"""
 
         # 匹配法律条款的正则表达式
         # 匹配 "第X条"、"第X条规定"、"《法律名称》第X条" 等格式
-        article_pattern = r'第[零一二三四五六七八九十百千万\d]+条'
+        article_pattern = r"第[零一二三四五六七八九十百千万\d]+条"
 
         # 找到所有条款的位置
         articles = []
         for match in re.finditer(article_pattern, text):
-            articles.append({
-                'start': match.start(),
-                'text': match.group(),
-                'content': ''
-            })
+            articles.append({"start": match.start(), "text": match.group(), "content": ""})
 
         # 如果没有找到条款，回退到普通分块
         if not articles:
@@ -32,11 +28,11 @@ class DocumentSplitter(TextSplitter):
         # 为每个条款提取内容
         chunks = []
         for i, article in enumerate(articles):
-            start_pos = article['start']
+            start_pos = article["start"]
 
             # 确定当前条款的结束位置（下一个条款的开始或文本结尾）
             if i < len(articles) - 1:
-                end_pos = articles[i + 1]['start']
+                end_pos = articles[i + 1]["start"]
             else:
                 end_pos = len(text)
 
@@ -52,10 +48,10 @@ class DocumentSplitter(TextSplitter):
 
         return chunks
 
-    def _split_long_article(self, article_content: str) -> List[str]:
+    def _split_long_article(self, article_content: str) -> list[str]:
         """对过长的条款进行进一步分割（保留原始标点）"""
         # 按句号、分号等标点分割，使用捕获组保留分隔符
-        parts = re.split(r'([。；;])', article_content)
+        parts = re.split(r"([。；;])", article_content)
 
         chunks = []
         current_chunk = ""
@@ -90,10 +86,14 @@ class DocumentSplitter(TextSplitter):
                 if current_chunk:
                     chunks.append(current_chunk)
                     # 重叠：取上一块末尾的 N 个字符作为上下文
-                    overlap_text = current_chunk[-self._chunk_overlap:] if len(current_chunk) > self._chunk_overlap else current_chunk
+                    overlap_text = (
+                        current_chunk[-self._chunk_overlap :]
+                        if len(current_chunk) > self._chunk_overlap
+                        else current_chunk
+                    )
                     # Ensure overlap + sentence doesn't exceed chunk_size
                     if len(overlap_text) + len(sentence_with_delim) > self._chunk_size:
-                        overlap_text = overlap_text[:self._chunk_size - len(sentence_with_delim)]
+                        overlap_text = overlap_text[: self._chunk_size - len(sentence_with_delim)]
                     current_chunk = overlap_text + sentence_with_delim
                 else:
                     chunks.append(sentence_with_delim)
@@ -105,11 +105,10 @@ class DocumentSplitter(TextSplitter):
 
         return chunks
 
-    def _fallback_split(self, text: str) -> List[str]:
+    def _fallback_split(self, text: str) -> list[str]:
         """回退到普通分块策略"""
         fallback_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=self._chunk_size,
-            chunk_overlap=self._chunk_overlap
+            chunk_size=self._chunk_size, chunk_overlap=self._chunk_overlap
         )
         return fallback_splitter.split_text(text)
 
@@ -119,15 +118,13 @@ class GeneralDocumentSplitter:
 
     def __init__(self, chunk_size: int = 200, chunk_overlap: int = 20):
         self.splitter = RecursiveCharacterTextSplitter(
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            length_function=len
+            chunk_size=chunk_size, chunk_overlap=chunk_overlap, length_function=len
         )
 
-    def split_text(self, text: str) -> List[str]:
+    def split_text(self, text: str) -> list[str]:
         """通用文档分块"""
         return self.splitter.split_text(text)
 
-    def split_documents(self, documents: List) -> List:
+    def split_documents(self, documents: list) -> list:
         """分割文档对象"""
         return self.splitter.split_documents(documents)

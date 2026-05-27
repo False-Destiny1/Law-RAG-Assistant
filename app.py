@@ -1,20 +1,22 @@
-import os
-import uuid
-import secrets
-import hmac
 import hashlib
+import hmac
+import json as _json
 import logging
-from datetime import datetime, timedelta, timezone
-from typing import Optional
+import os
+import secrets
+import uuid
+from contextlib import suppress
+from datetime import datetime, timezone
 
-from fastapi import FastAPI, Request, Form, UploadFile, File, Depends, HTTPException, Response, BackgroundTasks
-from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
-from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, ForeignKey, Index
-from sqlalchemy.orm import declarative_base, sessionmaker, relationship, Session, joinedload, subqueryload
 import bcrypt
 from dotenv import load_dotenv
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from sqlalchemy import Column, DateTime, ForeignKey, Index, Integer, String, Text, create_engine
+from sqlalchemy import text as _text
+from sqlalchemy.orm import Session, declarative_base, joinedload, relationship, sessionmaker, subqueryload
 
 from law_assistant.rag import DeepSeekApiRag
 from law_assistant.security import check_injection
@@ -28,8 +30,6 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
-
-import json as _json
 
 
 def _safe_int(value, default=None):
@@ -102,6 +102,7 @@ async def csrf_middleware(request: Request, call_next):
                 try:
                     body = await request.body()
                     import urllib.parse
+
                     parsed = urllib.parse.parse_qs(body.decode("utf-8", errors="ignore"))
                     tokens = parsed.get("csrf_token", [])
                     form_token = tokens[0] if tokens else ""
@@ -127,12 +128,16 @@ def _get_rate_limit_id(request: Request) -> str:
             parts = token.split(":")
             if len(parts) == 4:
                 user_id_str, nonce, timestamp_str, sig = parts
-                expected = hmac.new(SESSION_SECRET.encode(), f"{user_id_str}:{nonce}:{timestamp_str}".encode(), hashlib.sha256).hexdigest()[:32]
+                expected = hmac.new(
+                    SESSION_SECRET.encode(), f"{user_id_str}:{nonce}:{timestamp_str}".encode(), hashlib.sha256
+                ).hexdigest()[:32]
                 if hmac.compare_digest(sig, expected):
                     return f"user:{user_id_str}"
             elif len(parts) == 3:
                 user_id_str, nonce, sig = parts
-                expected = hmac.new(SESSION_SECRET.encode(), f"{user_id_str}:{nonce}".encode(), hashlib.sha256).hexdigest()[:32]
+                expected = hmac.new(
+                    SESSION_SECRET.encode(), f"{user_id_str}:{nonce}".encode(), hashlib.sha256
+                ).hexdigest()[:32]
                 if hmac.compare_digest(sig, expected):
                     return f"user:{user_id_str}"
         except Exception:
@@ -153,6 +158,7 @@ async def rate_limit_middleware(request: Request, call_next):
         return await call_next(request)
     try:
         from law_assistant.redis_utils import rate_limit_check
+
         identifier = _get_rate_limit_id(request)
         path = request.url.path
         if path.startswith("/ask_stream"):
@@ -168,7 +174,7 @@ async def rate_limit_middleware(request: Request, call_next):
             return JSONResponse(
                 {"error": "请求过于频繁，请稍后再试"},
                 status_code=429,
-                headers={"Retry-After": "60", "X-RateLimit-Remaining": "0"}
+                headers={"Retry-After": "60", "X-RateLimit-Remaining": "0"},
             )
         response = await call_next(request)
         response.headers["X-RateLimit-Limit"] = str(limit)
@@ -180,6 +186,7 @@ async def rate_limit_middleware(request: Request, call_next):
     except Exception as e:
         # Redis 连接失败等运行时异常，跳过限流但记录日志
         import logging
+
         logging.getLogger(__name__).warning(f"限流中间件异常，跳过限流: {e}")
         return await call_next(request)
 
@@ -222,10 +229,10 @@ class User(Base):
     uploaded_documents = relationship("UploadedDocument", backref="user", cascade="all, delete-orphan")
 
     def set_password(self, password: str):
-        self.password_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        self.password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
     def check_password(self, password: str) -> bool:
-        return bcrypt.checkpw(password.encode('utf-8'), self.password_hash.encode('utf-8'))
+        return bcrypt.checkpw(password.encode("utf-8"), self.password_hash.encode("utf-8"))
 
 
 class KnowledgeBase(Base):
@@ -235,7 +242,9 @@ class KnowledgeBase(Base):
     name = Column(String(100), nullable=False)
     description = Column(Text)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    updated_at = Column(
+        DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
+    )
     documents = relationship("UploadedDocument", backref="knowledge_base", cascade="all, delete-orphan")
     chats = relationship("Chat", backref="knowledge_base")
 
@@ -246,7 +255,9 @@ class Chat(Base):
     user_id = Column(Integer, ForeignKey("user.id"), nullable=False)
     title = Column(String(100), nullable=False, default="新对话")
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    updated_at = Column(
+        DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
+    )
     knowledge_base_id = Column(Integer, ForeignKey("knowledge_base.id"), nullable=True)
     messages = relationship("Message", backref="chat", cascade="all, delete-orphan")
 
@@ -281,12 +292,12 @@ Index("ix_doc_user_kb", UploadedDocument.user_id, UploadedDocument.knowledge_bas
 
 Base.metadata.create_all(engine)
 # 确保索引存在（create_all 不会更新已存在的表）
-from sqlalchemy import text as _text
+
 _index_sqls = [
-    'CREATE INDEX IF NOT EXISTS ix_chat_user_updated ON chat (user_id, updated_at)',
-    'CREATE INDEX IF NOT EXISTS ix_message_chat ON message (chat_id)',
-    'CREATE INDEX IF NOT EXISTS ix_kb_user ON knowledge_base (user_id)',
-    'CREATE INDEX IF NOT EXISTS ix_doc_user_kb ON uploaded_document (user_id, knowledge_base_id)',
+    "CREATE INDEX IF NOT EXISTS ix_chat_user_updated ON chat (user_id, updated_at)",
+    "CREATE INDEX IF NOT EXISTS ix_message_chat ON message (chat_id)",
+    "CREATE INDEX IF NOT EXISTS ix_kb_user ON knowledge_base (user_id)",
+    "CREATE INDEX IF NOT EXISTS ix_doc_user_kb ON uploaded_document (user_id, knowledge_base_id)",
 ]
 with engine.connect() as _conn:
     for _sql in _index_sqls:
@@ -310,7 +321,7 @@ def create_session_token(user_id: int) -> str:
     return f"{payload}:{signature}"
 
 
-def get_current_user(request: Request, db: Session = Depends(get_db)) -> Optional[User]:
+def get_current_user(request: Request, db: Session = Depends(get_db)) -> User | None:
     token = request.cookies.get("session_token")
     if not token:
         return None
@@ -320,14 +331,18 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> Optiona
             # Backward compat: accept old 3-part tokens (no timestamp)
             if len(parts) == 3:
                 user_id_str, nonce, sig = parts
-                expected = hmac.new(SESSION_SECRET.encode(), f"{user_id_str}:{nonce}".encode(), hashlib.sha256).hexdigest()[:32]
+                expected = hmac.new(
+                    SESSION_SECRET.encode(), f"{user_id_str}:{nonce}".encode(), hashlib.sha256
+                ).hexdigest()[:32]
                 if not hmac.compare_digest(sig, expected):
                     return None
             else:
                 return None
         else:
             user_id_str, nonce, timestamp_str, sig = parts
-            expected = hmac.new(SESSION_SECRET.encode(), f"{user_id_str}:{nonce}:{timestamp_str}".encode(), hashlib.sha256).hexdigest()[:32]
+            expected = hmac.new(
+                SESSION_SECRET.encode(), f"{user_id_str}:{nonce}:{timestamp_str}".encode(), hashlib.sha256
+            ).hexdigest()[:32]
             if not hmac.compare_digest(sig, expected):
                 return None
             # Server-side expiry check
@@ -340,6 +355,7 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> Optiona
         # Try Redis cache first
         try:
             from law_assistant.redis_utils import cache_get_json
+
             cached = cache_get_json(f"user:{user_id}")
             if cached:
                 user = User(
@@ -357,12 +373,17 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> Optiona
         if user:
             try:
                 from law_assistant.redis_utils import cache_set_json
-                cache_set_json(f"user:{user_id}", {
-                    "id": user.id,
-                    "phone": user.phone,
-                    "username": user.username,
-                    "role": user.role,
-                }, ttl=300)
+
+                cache_set_json(
+                    f"user:{user_id}",
+                    {
+                        "id": user.id,
+                        "phone": user.phone,
+                        "username": user.username,
+                        "role": user.role,
+                    },
+                    ttl=300,
+                )
             except Exception:
                 pass
         return user
@@ -427,7 +448,7 @@ def initialize_vector_database():
         finally:
             db.close()
 
-        print(f"向量数据库构建完成")
+        print("向量数据库构建完成")
     else:
         print("向量数据库已存在，跳过初始化构建")
 
@@ -513,14 +534,12 @@ def login_submit(
     request: Request,
     identifier: str = Form(...),
     password: str = Form(...),
-    remember: Optional[str] = Form(None),
+    remember: str | None = Form(None),
     db: Session = Depends(get_db),
 ):
     user = db.query(User).filter(User.phone == identifier).first()
     if not user or not user.check_password(password):
-        return templates.TemplateResponse(request, "login.html", {
-            "error": "手机号或密码错误"
-        })
+        return templates.TemplateResponse(request, "login.html", {"error": "手机号或密码错误"})
 
     token = create_session_token(user.id)
     response = RedirectResponse(url="/", status_code=303)
@@ -557,9 +576,7 @@ def register_submit(
         errors.append("该用户名已存在")
 
     if errors:
-        return templates.TemplateResponse(request, "register.html", {
-            "errors": errors
-        })
+        return templates.TemplateResponse(request, "register.html", {"errors": errors})
 
     new_user = User(phone=phone, username=username, role="user")
     new_user.set_password(password)
@@ -585,10 +602,10 @@ def home(request: Request, user: User = Depends(require_user)):
 
 @app.get("/knowledge-bases", response_class=HTMLResponse)
 def knowledge_bases_page(request: Request, user: User = Depends(require_user), db: Session = Depends(get_db)):
-    kb_list = db.query(KnowledgeBase).filter(KnowledgeBase.user_id == user.id).order_by(KnowledgeBase.updated_at.desc()).all()
-    return templates.TemplateResponse(request, "knowledge_base.html", {
-        "user": user, "knowledge_bases": kb_list
-    })
+    kb_list = (
+        db.query(KnowledgeBase).filter(KnowledgeBase.user_id == user.id).order_by(KnowledgeBase.updated_at.desc()).all()
+    )
+    return templates.TemplateResponse(request, "knowledge_base.html", {"user": user, "knowledge_bases": kb_list})
 
 
 @app.get("/knowledge-base/create", response_class=HTMLResponse)
@@ -615,9 +632,7 @@ def edit_kb_page(kb_id: int, request: Request, user: User = Depends(require_user
     kb = db.query(KnowledgeBase).filter(KnowledgeBase.id == kb_id, KnowledgeBase.user_id == user.id).first()
     if not kb:
         return RedirectResponse(url="/knowledge-bases", status_code=303)
-    return templates.TemplateResponse(request, "edit_knowledge_base.html", {
-        "user": user, "kb": kb
-    })
+    return templates.TemplateResponse(request, "edit_knowledge_base.html", {"user": user, "kb": kb})
 
 
 @app.post("/knowledge-base/{kb_id}/edit")
@@ -644,10 +659,8 @@ def delete_kb(kb_id: int, user: User = Depends(require_user), db: Session = Depe
     if kb:
         for doc in kb.documents:
             if os.path.exists(doc.file_path):
-                try:
+                with suppress(Exception):
                     os.remove(doc.file_path)
-                except Exception:
-                    pass
         db.delete(kb)
         db.commit()
     return RedirectResponse(url="/knowledge-bases", status_code=303)
@@ -658,10 +671,15 @@ def upload_page(request: Request, user: User = Depends(require_user), db: Sessio
     if user.role not in ["expert", "admin"]:
         return RedirectResponse(url="/", status_code=303)
     kbs = db.query(KnowledgeBase).filter(KnowledgeBase.user_id == user.id).order_by(KnowledgeBase.name).all()
-    docs = db.query(UploadedDocument).filter(UploadedDocument.user_id == user.id).order_by(UploadedDocument.uploaded_at.desc()).all()
-    return templates.TemplateResponse(request, "upload.html", {
-        "user": user, "knowledge_bases": kbs, "uploaded_docs": docs
-    })
+    docs = (
+        db.query(UploadedDocument)
+        .filter(UploadedDocument.user_id == user.id)
+        .order_by(UploadedDocument.uploaded_at.desc())
+        .all()
+    )
+    return templates.TemplateResponse(
+        request, "upload.html", {"user": user, "knowledge_bases": kbs, "uploaded_docs": docs}
+    )
 
 
 def _process_document_async(file_path: str, doc_id: int, knowledge_base_id: int = None):
@@ -680,7 +698,7 @@ async def upload_submit(
     request: Request,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    knowledge_base_id: Optional[str] = Form(None),
+    knowledge_base_id: str | None = Form(None),
     user: User = Depends(require_user),
     db: Session = Depends(get_db),
 ):
@@ -728,9 +746,10 @@ def delete_document(doc_id: int, user: User = Depends(require_user), db: Session
         try:
             if os.path.exists(doc.file_path):
                 from law_assistant.processor import DocumentProcessor
+
                 processor = DocumentProcessor()
                 chunks = processor.process_document(doc.file_path)
-                texts_to_remove = [c['full_text'] for c in chunks]
+                texts_to_remove = [c["full_text"] for c in chunks]
                 if texts_to_remove:
                     rag_model.bm25_retriever.remove_documents(texts_to_remove)
                     rag_model.bm25_retriever.save_index()
@@ -740,10 +759,8 @@ def delete_document(doc_id: int, user: User = Depends(require_user), db: Session
             print(f"从索引中移除文档失败: {e}")
 
         if os.path.exists(doc.file_path):
-            try:
+            with suppress(Exception):
                 os.remove(doc.file_path)
-            except Exception:
-                pass
         db.delete(doc)
         db.commit()
     return RedirectResponse(url="/upload", status_code=303)
@@ -752,27 +769,45 @@ def delete_document(doc_id: int, user: User = Depends(require_user), db: Session
 # ── API routes ───────────────────────────────────────────────────────
 @app.get("/api/chats")
 def get_chats(user: User = Depends(require_user), db: Session = Depends(get_db)):
-    chats = db.query(Chat).options(joinedload(Chat.knowledge_base)).filter(Chat.user_id == user.id).order_by(Chat.updated_at.desc()).all()
-    return [{
-        "id": c.id, "title": c.title,
-        "created_at": c.created_at.isoformat(),
-        "updated_at": c.updated_at.isoformat(),
-        "knowledge_base_id": c.knowledge_base_id,
-        "knowledge_base_name": c.knowledge_base.name if c.knowledge_base else None,
-    } for c in chats]
+    chats = (
+        db.query(Chat)
+        .options(joinedload(Chat.knowledge_base))
+        .filter(Chat.user_id == user.id)
+        .order_by(Chat.updated_at.desc())
+        .all()
+    )
+    return [
+        {
+            "id": c.id,
+            "title": c.title,
+            "created_at": c.created_at.isoformat(),
+            "updated_at": c.updated_at.isoformat(),
+            "knowledge_base_id": c.knowledge_base_id,
+            "knowledge_base_name": c.knowledge_base.name if c.knowledge_base else None,
+        }
+        for c in chats
+    ]
 
 
 @app.get("/api/chats/{chat_id}")
 def get_chat_messages(chat_id: int, user: User = Depends(require_user), db: Session = Depends(get_db)):
-    chat = db.query(Chat).options(joinedload(Chat.knowledge_base)).filter(Chat.id == chat_id, Chat.user_id == user.id).first()
+    chat = (
+        db.query(Chat)
+        .options(joinedload(Chat.knowledge_base))
+        .filter(Chat.id == chat_id, Chat.user_id == user.id)
+        .first()
+    )
     if not chat:
         return JSONResponse({"error": "对话不存在"}, status_code=404)
     messages = db.query(Message).filter(Message.chat_id == chat_id).order_by(Message.created_at).all()
     return {
-        "id": chat.id, "title": chat.title,
+        "id": chat.id,
+        "title": chat.title,
         "knowledge_base_id": chat.knowledge_base_id,
         "knowledge_base_name": chat.knowledge_base.name if chat.knowledge_base else None,
-        "messages": [{"id": m.id, "role": m.role, "content": m.content, "created_at": m.created_at.isoformat()} for m in messages],
+        "messages": [
+            {"id": m.id, "role": m.role, "content": m.content, "created_at": m.created_at.isoformat()} for m in messages
+        ],
     }
 
 
@@ -791,7 +826,9 @@ def create_chat(user: User = Depends(require_user), db: Session = Depends(get_db
 
 
 @app.put("/api/chats/{chat_id}")
-async def update_chat(chat_id: int, request: Request, user: User = Depends(require_user), db: Session = Depends(get_db)):
+async def update_chat(
+    chat_id: int, request: Request, user: User = Depends(require_user), db: Session = Depends(get_db)
+):
     chat = db.query(Chat).filter(Chat.id == chat_id, Chat.user_id == user.id).first()
     if not chat:
         return JSONResponse({"error": "对话不存在"}, status_code=404)
@@ -835,7 +872,13 @@ def clear_chat_memory(chat_id: int, user: User = Depends(require_user), db: Sess
 
 @app.get("/api/knowledge-bases")
 def get_knowledge_bases_api(user: User = Depends(require_user), db: Session = Depends(get_db)):
-    kbs = db.query(KnowledgeBase).options(subqueryload(KnowledgeBase.documents)).filter(KnowledgeBase.user_id == user.id).order_by(KnowledgeBase.updated_at.desc()).all()
+    kbs = (
+        db.query(KnowledgeBase)
+        .options(subqueryload(KnowledgeBase.documents))
+        .filter(KnowledgeBase.user_id == user.id)
+        .order_by(KnowledgeBase.updated_at.desc())
+        .all()
+    )
     return [{"id": k.id, "name": k.name, "description": k.description, "document_count": len(k.documents)} for k in kbs]
 
 
@@ -878,11 +921,14 @@ async def ask_stream(request: Request, user: User = Depends(require_user), db: S
     safe, reason = check_injection(user_input)
     if not safe:
         import json as _inj_json
+
         def _reject():
-            yield f'data: {_inj_json.dumps({"error": reason}, ensure_ascii=False)}\n\n'
+            yield f"data: {_inj_json.dumps({'error': reason}, ensure_ascii=False)}\n\n"
             yield 'data: {"done": true}\n\n'
-        return StreamingResponse(_reject(), media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+        return StreamingResponse(
+            _reject(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+        )
 
     # Verify chat belongs to current user
     try:
@@ -898,10 +944,7 @@ async def ask_stream(request: Request, user: User = Depends(require_user), db: S
     # P13: 直接传递 knowledge_base_id 给 RAG 模型做 metadata 过滤，不再创建临时实例
     kb_id_int = _safe_int(kb_id) if user.role in ["expert", "admin"] else None
     result = rag_model.generate_response_stream(
-        user_input,
-        conversation_id=conversation_id,
-        knowledge_base_id=kb_id_int,
-        db_session=db
+        user_input, conversation_id=conversation_id, knowledge_base_id=kb_id_int, db_session=db
     )
 
     # Save user message
@@ -918,7 +961,7 @@ async def ask_stream(request: Request, user: User = Depends(require_user), db: S
             for chunk in result["stream"]:
                 content = chunk.content
                 full_response += content
-                yield f'data: {_json.dumps({"content": content}, ensure_ascii=False)}\n\n'
+                yield f"data: {_json.dumps({'content': content}, ensure_ascii=False)}\n\n"
 
             rag_model.save_bot_response(conversation_id, full_response)
 
@@ -938,16 +981,18 @@ async def ask_stream(request: Request, user: User = Depends(require_user), db: S
             logger.error(f"生成回复时出现错误: {e}", exc_info=True)
             error_msg = "抱歉，生成回复时出现错误，请稍后重试"
             rag_model.save_bot_response(conversation_id, error_msg)
-            yield f'data: {_json.dumps({"error": error_msg}, ensure_ascii=False)}\n\n'
+            yield f"data: {_json.dumps({'error': error_msg}, ensure_ascii=False)}\n\n"
             yield 'data: {"done": true}\n\n'
 
-    return StreamingResponse(generate(), media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    return StreamingResponse(
+        generate(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+    )
 
 
 @app.on_event("startup")
 async def startup_event():
     from law_assistant.redis_utils import is_available
+
     if is_available():
         print("Redis 连接成功")
     else:
@@ -957,9 +1002,11 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     from law_assistant.redis_utils import close_pool
+
     close_pool()
 
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=5000)

@@ -1,17 +1,17 @@
 """Unit tests for law_assistant.graph module."""
-import pytest
+
 from unittest.mock import MagicMock
+
 from law_assistant.graph import (
-    LegalKnowledgeGraph,
-    _cn_to_int,
     ARTICLE_PATTERN,
     CHAPTER_PATTERN,
-    LAW_CATEGORIES,
     LEGAL_CONCEPTS,
+    LegalKnowledgeGraph,
+    _cn_to_int,
 )
 
-
 # ─── _cn_to_int ─────────────────────────────────────────────
+
 
 class TestCnToInt:
     def test_digit_passthrough(self):
@@ -45,6 +45,7 @@ class TestCnToInt:
 
 # ─── extract_law_name ───────────────────────────────────────
 
+
 class TestExtractLawName:
     def test_basic(self):
         text = "根据《中华人民共和国民法典》第一百四十三条"
@@ -64,6 +65,7 @@ class TestExtractLawName:
 
 
 # ─── classify_law ───────────────────────────────────────────
+
 
 class TestClassifyLaw:
     def test_civil(self):
@@ -95,6 +97,7 @@ class TestClassifyLaw:
 
 # ─── extract_chapters ───────────────────────────────────────
 
+
 class TestExtractChapters:
     def test_basic(self):
         text = "第一章 总则\n第一条 ...\n第二章 物权\n第一百一十四条 ..."
@@ -117,6 +120,7 @@ class TestExtractChapters:
 
 
 # ─── extract_articles ───────────────────────────────────────
+
 
 class TestExtractArticles:
     def test_basic(self):
@@ -153,6 +157,7 @@ class TestExtractArticles:
 
 # ─── extract_citations ──────────────────────────────────────
 
+
 class TestExtractCitations:
     def test_self_cite(self):
         text = "依照本法第五百八十四条的规定承担赔偿责任"
@@ -181,6 +186,7 @@ class TestExtractCitations:
 
 # ─── extract_concepts ───────────────────────────────────────
 
+
 class TestExtractConcepts:
     def test_basic(self):
         text = "善意取得的，受让人取得不动产或者动产的所有权。"
@@ -202,6 +208,7 @@ class TestExtractConcepts:
 
 
 # ─── extract_legal_entities ─────────────────────────────────
+
 
 class TestExtractLegalEntities:
     def test_full_query(self):
@@ -227,6 +234,7 @@ class TestExtractLegalEntities:
 
 
 # ─── LegalKnowledgeGraph (mocked Neo4j) ─────────────────────
+
 
 class TestLegalKnowledgeGraphInit:
     def test_default_config(self):
@@ -329,6 +337,7 @@ class TestGraphSearchMocked:
 
 # ─── ARTICLE_PATTERN regex ──────────────────────────────────
 
+
 class TestArticlePattern:
     def test_chinese_number(self):
         match = ARTICLE_PATTERN.search("第一百四十三条")
@@ -351,6 +360,7 @@ class TestArticlePattern:
 
 
 # ─── CHAPTER_PATTERN regex ──────────────────────────────────
+
 
 class TestChapterPattern:
     def test_chapter(self):

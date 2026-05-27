@@ -3,16 +3,22 @@
 测试不同 vector/BM25 权重组合，找到最优配置。
 运行前确保服务已启动: python -m uvicorn app:app --host 127.0.0.1 --port 8080
 """
-import requests
+
 import json
-import time
 import sys
+import time
+
+import requests
 
 BASE_URL = "http://127.0.0.1:8080"
 
 # ── 测试用例（与 baseline_eval.py 一致）──
 TEST_CASES = [
-    {"id": "R1", "query": "劳动合同解除的条件有哪些？", "expect_keywords": ["第三十九条", "第四十条", "用人单位", "劳动者"]},
+    {
+        "id": "R1",
+        "query": "劳动合同解除的条件有哪些？",
+        "expect_keywords": ["第三十九条", "第四十条", "用人单位", "劳动者"],
+    },
     {"id": "R2", "query": "老板不给加班费怎么办", "expect_keywords": ["加班", "工资报酬", "第四十四条"]},
     {"id": "R3", "query": "离婚财产怎么分", "expect_keywords": ["共同财产", "分割", "第一千零八十七条"]},
     {"id": "R4", "query": "离婚时财产怎么分，孩子抚养权归谁？", "expect_keywords": ["财产", "抚养", "子女"]},
@@ -41,9 +47,11 @@ WEIGHT_COMBOS = [
 
 
 def login(session):
-    resp = session.post(f"{BASE_URL}/login", data={
-        "identifier": "admin", "password": "admin123", "remember": "on"
-    }, allow_redirects=False)
+    resp = session.post(
+        f"{BASE_URL}/login",
+        data={"identifier": "admin", "password": "admin123", "remember": "on"},
+        allow_redirects=False,
+    )
     return resp.status_code in (200, 303)
 
 
@@ -55,9 +63,7 @@ def create_chat(session):
 
 
 def set_weights(session, vw, bw):
-    resp = session.post(f"{BASE_URL}/api/retrieval-weights", data={
-        "vector_weight": vw, "bm25_weight": bw
-    })
+    resp = session.post(f"{BASE_URL}/api/retrieval-weights", data={"vector_weight": vw, "bm25_weight": bw})
     return resp.status_code == 200
 
 
@@ -66,9 +72,15 @@ def ask_and_score(session, chat_id, query, keywords):
     start = time.time()
     full_answer = ""
     try:
-        resp = session.post(f"{BASE_URL}/ask_stream", data={
-            "user_input": query, "chat_id": chat_id,
-        }, stream=True, timeout=90)
+        resp = session.post(
+            f"{BASE_URL}/ask_stream",
+            data={
+                "user_input": query,
+                "chat_id": chat_id,
+            },
+            stream=True,
+            timeout=90,
+        )
         for line in resp.iter_lines(decode_unicode=True):
             if not line or not line.startswith("data: "):
                 continue
@@ -143,18 +155,20 @@ def main():
         avg_hit = sum(hit_rates) / len(hit_rates)
         avg_time = sum(times) / len(times)
 
-        all_results.append({
-            "vector_weight": vw,
-            "bm25_weight": bw,
-            "label": label,
-            "avg_hit_rate": round(avg_hit, 3),
-            "avg_time": round(avg_time, 2),
-            "details": details,
-        })
+        all_results.append(
+            {
+                "vector_weight": vw,
+                "bm25_weight": bw,
+                "label": label,
+                "avg_hit_rate": round(avg_hit, 3),
+                "avg_time": round(avg_time, 2),
+                "details": details,
+            }
+        )
 
         # 打印每个用例的命中情况
-        detail_str = " | ".join([f"{d['id']}:{d['hit']*100:.0f}%" for d in details])
-        print(f"[{tag}]  命中率={avg_hit*100:.1f}%  耗时={avg_time:.1f}s  {detail_str}")
+        detail_str = " | ".join([f"{d['id']}:{d['hit'] * 100:.0f}%" for d in details])
+        print(f"[{tag}]  命中率={avg_hit * 100:.1f}%  耗时={avg_time:.1f}s  {detail_str}")
 
     # 汇总排名
     print("\n" + "=" * 70)
@@ -165,12 +179,14 @@ def main():
     print("-" * 60)
     for i, r in enumerate(all_results, 1):
         tag = f"{r['vector_weight']:.1f}/{r['bm25_weight']:.1f}"
-        print(f"{i:<4} {tag:<14} {r['avg_hit_rate']*100:.1f}%{'':<6} {r['avg_time']:.1f}s{'':<6} {r['label']}")
+        print(f"{i:<4} {tag:<14} {r['avg_hit_rate'] * 100:.1f}%{'':<6} {r['avg_time']:.1f}s{'':<6} {r['label']}")
 
     # 最优结果
     best = all_results[0]
-    print(f"\n最优权重: vector={best['vector_weight']}, bm25={best['bm25_weight']}  "
-          f"(命中率 {best['avg_hit_rate']*100:.1f}%, 耗时 {best['avg_time']:.1f}s)")
+    print(
+        f"\n最优权重: vector={best['vector_weight']}, bm25={best['bm25_weight']}  "
+        f"(命中率 {best['avg_hit_rate'] * 100:.1f}%, 耗时 {best['avg_time']:.1f}s)"
+    )
 
     # 保存完整结果
     output_file = "tests/manual/weight_test_results.json"

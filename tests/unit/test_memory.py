@@ -1,5 +1,5 @@
 """Unit tests for law_assistant.memory module."""
-import pytest
+
 from law_assistant.memory import ConversationMemory
 
 

@@ -1,5 +1,5 @@
 """Unit tests for law_assistant.security module."""
-import pytest
+
 from law_assistant.security import check_injection, sanitize_context
 
 

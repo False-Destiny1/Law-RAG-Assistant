@@ -3,11 +3,13 @@ RAG 系统基准测试脚本
 用于在改进前后对比检索和生成效果。
 运行前确保服务已启动: python -m uvicorn app:app --host 127.0.0.1 --port 8080
 """
-import requests
+
 import json
-import time
-import sys
 import os
+import sys
+import time
+
+import requests
 
 BASE_URL = "http://127.0.0.1:8080"
 
@@ -19,35 +21,35 @@ TEST_CASES = [
         "category": "检索-直接法律查询",
         "query": "劳动合同解除的条件有哪些？",
         "expect_keywords": ["第三十九条", "第四十条", "用人单位", "劳动者"],
-        "notes": "标准法律术语查询，应精确匹配《劳动合同法》相关条款"
+        "notes": "标准法律术语查询，应精确匹配《劳动合同法》相关条款",
     },
     {
         "id": "R2",
         "category": "检索-口语化查询",
         "query": "老板不给加班费怎么办",
         "expect_keywords": ["加班", "工资报酬", "第四十四条"],
-        "notes": "口语化表达，当前系统直接检索，应匹配《劳动法》加班工资条款"
+        "notes": "口语化表达，当前系统直接检索，应匹配《劳动法》加班工资条款",
     },
     {
         "id": "R3",
         "category": "检索-模糊查询",
         "query": "离婚财产怎么分",
         "expect_keywords": ["共同财产", "分割", "第一千零八十七条"],
-        "notes": "短查询，向量检索可能召回率低"
+        "notes": "短查询，向量检索可能召回率低",
     },
     {
         "id": "R4",
         "category": "检索-复合问题",
         "query": "离婚时财产怎么分，孩子抚养权归谁？",
         "expect_keywords": ["财产", "抚养", "子女"],
-        "notes": "两个独立子问题混合，应分别检索到财产分割和抚养权条款"
+        "notes": "两个独立子问题混合，应分别检索到财产分割和抚养权条款",
     },
     {
         "id": "R5",
         "category": "检索-冷门法律",
         "query": "深海海底资源勘探有什么法律规定",
         "expect_keywords": ["深海海底", "资源勘探"],
-        "notes": "冷门法律，测试小众领域检索能力"
+        "notes": "冷门法律，测试小众领域检索能力",
     },
     # === 多轮对话测试 ===
     {
@@ -56,7 +58,7 @@ TEST_CASES = [
         "query": "那试用期呢？",
         "context": "上一轮问的是劳动合同解除条件",
         "expect_keywords": ["试用期", "解除"],
-        "notes": "需要理解'那'指代的是劳动合同解除，当前系统可能检索不到"
+        "notes": "需要理解'那'指代的是劳动合同解除，当前系统可能检索不到",
     },
     {
         "id": "M2",
@@ -64,7 +66,7 @@ TEST_CASES = [
         "query": "具体要赔偿多少钱？",
         "context": "上一轮问的是违法解除劳动合同的后果",
         "expect_keywords": ["赔偿", "经济补偿", "二倍"],
-        "notes": "需要理解上下文才能检索到赔偿标准"
+        "notes": "需要理解上下文才能检索到赔偿标准",
     },
     # === 边界情况测试 ===
     {
@@ -72,32 +74,30 @@ TEST_CASES = [
         "category": "边界-无关问题",
         "query": "今天天气怎么样？",
         "expect_keywords": [],
-        "notes": "应如实回答无法回答，不应编造法律条文"
+        "notes": "应如实回答无法回答，不应编造法律条文",
     },
     {
         "id": "E2",
         "category": "边界-超短查询",
         "query": "借钱",
         "expect_keywords": ["借款", "借贷", "合同"],
-        "notes": "极短查询，测试检索鲁棒性"
+        "notes": "极短查询，测试检索鲁棒性",
     },
     {
         "id": "E3",
         "category": "边界-跨法律查询",
         "query": "网络诈骗涉及哪些法律？",
         "expect_keywords": ["诈骗", "刑法", "电信网络诈骗"],
-        "notes": "需要检索多部法律（刑法、反电信网络诈骗法等）"
+        "notes": "需要检索多部法律（刑法、反电信网络诈骗法等）",
     },
 ]
 
 
 def login(session: requests.Session, phone: str = "13333333333", password: str = "123456"):
     """登录获取会话"""
-    resp = session.post(f"{BASE_URL}/login", data={
-        "identifier": phone,
-        "password": password,
-        "remember": "on"
-    }, allow_redirects=False)
+    resp = session.post(
+        f"{BASE_URL}/login", data={"identifier": phone, "password": password, "remember": "on"}, allow_redirects=False
+    )
     return resp.status_code in (200, 303)
 
 
@@ -117,10 +117,15 @@ def ask_stream(session: requests.Session, chat_id: str, query: str, timeout: int
     error = None
 
     try:
-        resp = session.post(f"{BASE_URL}/ask_stream", data={
-            "user_input": query,
-            "chat_id": chat_id,
-        }, stream=True, timeout=timeout)
+        resp = session.post(
+            f"{BASE_URL}/ask_stream",
+            data={
+                "user_input": query,
+                "chat_id": chat_id,
+            },
+            stream=True,
+            timeout=timeout,
+        )
 
         for line in resp.iter_lines(decode_unicode=True):
             if not line or not line.startswith("data: "):
@@ -164,11 +169,7 @@ def check_keywords(answer: str, keywords: list) -> dict:
         else:
             missing.append(kw)
     hit_rate = len(found) / len(keywords) if keywords else 1.0
-    return {
-        "found": found,
-        "missing": missing,
-        "hit_rate": round(hit_rate, 2)
-    }
+    return {"found": found, "missing": missing, "hit_rate": round(hit_rate, 2)}
 
 
 def run_evaluation():
@@ -212,25 +213,27 @@ def run_evaluation():
 
         print(f"耗时: {result['elapsed_sec']}s | 字数: {result['char_count']}")
         print(f"关键词命中率: {kw_check['hit_rate'] * 100}% ({len(kw_check['found'])}/{len(tc['expect_keywords'])})")
-        if kw_check['missing']:
+        if kw_check["missing"]:
             print(f"缺失关键词: {kw_check['missing']}")
-        if result['error']:
+        if result["error"]:
             print(f"错误: {result['error']}")
         print(f"回答前100字: {result['answer'][:100]}...")
 
-        results.append({
-            "test_id": tc["id"],
-            "category": tc["category"],
-            "query": tc["query"],
-            "answer_preview": result["answer"][:200],
-            "answer_length": result["char_count"],
-            "elapsed_sec": result["elapsed_sec"],
-            "keyword_hit_rate": kw_check["hit_rate"],
-            "keywords_found": kw_check["found"],
-            "keywords_missing": kw_check["missing"],
-            "error": result["error"],
-            "notes": tc["notes"],
-        })
+        results.append(
+            {
+                "test_id": tc["id"],
+                "category": tc["category"],
+                "query": tc["query"],
+                "answer_preview": result["answer"][:200],
+                "answer_length": result["char_count"],
+                "elapsed_sec": result["elapsed_sec"],
+                "keyword_hit_rate": kw_check["hit_rate"],
+                "keywords_found": kw_check["found"],
+                "keywords_missing": kw_check["missing"],
+                "error": result["error"],
+                "notes": tc["notes"],
+            }
+        )
 
     # 汇总统计
     print("\n" + "=" * 60)
@@ -261,7 +264,7 @@ def run_evaluation():
             "avg_keyword_hit_rate": round(avg_hit, 3),
             "avg_answer_length": round(avg_len),
         },
-        "results": results
+        "results": results,
     }
 
     output_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "baseline_results.json")

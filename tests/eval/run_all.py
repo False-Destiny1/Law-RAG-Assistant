@@ -4,9 +4,10 @@
   python tests/eval/run_all.py              — 运行所有离线测试
   python tests/eval/run_all.py --online     — 包含需要服务器的在线测试
 """
-import sys
+
 import os
 import subprocess
+import sys
 
 TEST_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -59,7 +60,7 @@ def main():
             else:
                 failed += 1
     else:
-        print(f"\n跳过在线测试（使用 --online 参数运行）")
+        print("\n跳过在线测试（使用 --online 参数运行）")
 
     print(f"\n{'=' * 50}")
     print(f"结果: {passed} 通过, {failed} 失败")

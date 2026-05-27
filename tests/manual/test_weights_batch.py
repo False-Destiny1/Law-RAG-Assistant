@@ -1,8 +1,10 @@
 """分批测试混合检索权重"""
-import requests
+
 import json
-import time
 import sys
+import time
+
+import requests
 
 BASE_URL = "http://127.0.0.1:8080"
 
@@ -21,7 +23,11 @@ TEST_CASES = [
 
 
 def login(session):
-    r = session.post(f"{BASE_URL}/login", data={"identifier": "admin", "password": "admin123", "remember": "on"}, allow_redirects=False)
+    r = session.post(
+        f"{BASE_URL}/login",
+        data={"identifier": "admin", "password": "admin123", "remember": "on"},
+        allow_redirects=False,
+    )
     return r.status_code in (200, 303)
 
 
@@ -31,14 +37,19 @@ def create_chat(session):
 
 
 def set_weights(session, vw, bw):
-    return session.post(f"{BASE_URL}/api/retrieval-weights", data={"vector_weight": vw, "bm25_weight": bw}).status_code == 200
+    return (
+        session.post(f"{BASE_URL}/api/retrieval-weights", data={"vector_weight": vw, "bm25_weight": bw}).status_code
+        == 200
+    )
 
 
 def ask_and_score(session, chat_id, query, keywords):
     start = time.time()
     full = ""
     try:
-        resp = session.post(f"{BASE_URL}/ask_stream", data={"user_input": query, "chat_id": chat_id}, stream=True, timeout=90)
+        resp = session.post(
+            f"{BASE_URL}/ask_stream", data={"user_input": query, "chat_id": chat_id}, stream=True, timeout=90
+        )
         for line in resp.iter_lines(decode_unicode=True):
             if not line or not line.startswith("data: "):
                 continue
@@ -62,28 +73,32 @@ def ask_and_score(session, chat_id, query, keywords):
 def run_batch(weights):
     s = requests.Session()
     if not login(s):
-        print("登录失败"); sys.exit(1)
+        print("登录失败")
+        sys.exit(1)
 
     results = []
     for vw, bw, label in weights:
         tag = f"V{vw}/B{bw}" + (f" ({label})" if label else "")
         if not set_weights(s, vw, bw):
-            print(f"[{tag}] 设置权重失败"); continue
+            print(f"[{tag}] 设置权重失败")
+            continue
         chat = create_chat(s)
         if not chat:
-            print(f"[{tag}] 创建对话失败"); continue
+            print(f"[{tag}] 创建对话失败")
+            continue
 
         hits, times = [], []
         details = []
         for tc in TEST_CASES:
             h, t = ask_and_score(s, chat, tc["query"], tc["kw"])
-            hits.append(h); times.append(t)
-            details.append(f"{tc['id']}:{h*100:.0f}%")
+            hits.append(h)
+            times.append(t)
+            details.append(f"{tc['id']}:{h * 100:.0f}%")
 
         avg_h = sum(hits) / len(hits)
         avg_t = sum(times) / len(times)
         results.append({"vw": vw, "bw": bw, "label": label, "hit": round(avg_h, 3), "time": round(avg_t, 2)})
-        print(f"[{tag}]  命中={avg_h*100:.1f}%  耗时={avg_t:.1f}s  {' | '.join(details)}")
+        print(f"[{tag}]  命中={avg_h * 100:.1f}%  耗时={avg_t:.1f}s  {' | '.join(details)}")
 
     return results
 
@@ -96,7 +111,8 @@ if __name__ == "__main__":
         3: [(0.2, 0.8, ""), (0.1, 0.9, "BM25为主"), (0.0, 1.0, "纯BM25")],
     }
     if batch not in batches:
-        print(f"用法: python test_weights_batch.py [1|2|3]"); sys.exit(1)
+        print("用法: python test_weights_batch.py [1|2|3]")
+        sys.exit(1)
 
     print(f"=== 第 {batch} 组权重测试 ===")
     results = run_batch(batches[batch])

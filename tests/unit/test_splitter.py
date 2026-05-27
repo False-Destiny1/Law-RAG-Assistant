@@ -1,5 +1,5 @@
 """Unit tests for law_assistant.splitter module."""
-import pytest
+
 from law_assistant.splitter import DocumentSplitter, GeneralDocumentSplitter
 
 

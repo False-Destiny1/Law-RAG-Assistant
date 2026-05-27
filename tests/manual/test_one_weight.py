@@ -1,8 +1,10 @@
 """测试单组权重，用法: python test_one_weight.py <vector_weight> <bm25_weight>"""
-import requests
+
 import json
-import time
 import sys
+import time
+
+import requests
 
 BASE_URL = "http://127.0.0.1:8080"
 
@@ -22,7 +24,9 @@ TEST_CASES = [
 vw, bw = float(sys.argv[1]), float(sys.argv[2])
 
 s = requests.Session()
-r = s.post(f"{BASE_URL}/login", data={"identifier": "admin", "password": "admin123", "remember": "on"}, allow_redirects=False)
+r = s.post(
+    f"{BASE_URL}/login", data={"identifier": "admin", "password": "admin123", "remember": "on"}, allow_redirects=False
+)
 assert r.status_code in (200, 303), "登录失败"
 
 r = s.post(f"{BASE_URL}/api/retrieval-weights", data={"vector_weight": vw, "bm25_weight": bw})
@@ -36,7 +40,9 @@ for tc in TEST_CASES:
     start = time.time()
     full = ""
     try:
-        resp = s.post(f"{BASE_URL}/ask_stream", data={"user_input": tc["query"], "chat_id": chat}, stream=True, timeout=90)
+        resp = s.post(
+            f"{BASE_URL}/ask_stream", data={"user_input": tc["query"], "chat_id": chat}, stream=True, timeout=90
+        )
         for line in resp.iter_lines(decode_unicode=True):
             if not line or not line.startswith("data: "):
                 continue
@@ -54,9 +60,10 @@ for tc in TEST_CASES:
     elapsed = round(time.time() - start, 2)
     kw = tc["kw"]
     hit = (sum(1 for k in kw if k in full) / len(kw)) if kw else 1.0
-    hits.append(hit); times.append(elapsed)
-    print(f"  {tc['id']}: {hit*100:.0f}%  {elapsed}s")
+    hits.append(hit)
+    times.append(elapsed)
+    print(f"  {tc['id']}: {hit * 100:.0f}%  {elapsed}s")
 
 avg_h = sum(hits) / len(hits)
 avg_t = sum(times) / len(times)
-print(f"\nV{vw}/B{bw}  平均命中={avg_h*100:.1f}%  平均耗时={avg_t:.1f}s")
+print(f"\nV{vw}/B{bw}  平均命中={avg_h * 100:.1f}%  平均耗时={avg_t:.1f}s")
