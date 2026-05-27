@@ -97,10 +97,14 @@ async def csrf_middleware(request: Request, call_next):
             # JSON requests check X-CSRF-Token header
             form_token = request.headers.get("X-CSRF-Token", "")
         elif "form" in content_type:
-            # Form requests check csrf_token field
+            # Form requests: parse body without consuming (use _form cached by Starlette)
             try:
-                form = await request.form()
-                form_token = form.get("csrf_token", "")
+                body = await request.body()
+                # Manually parse csrf_token from form body to avoid consuming stream
+                import urllib.parse
+                parsed = urllib.parse.parse_qs(body.decode("utf-8", errors="ignore"))
+                tokens = parsed.get("csrf_token", [])
+                form_token = tokens[0] if tokens else ""
             except Exception:
                 pass
 

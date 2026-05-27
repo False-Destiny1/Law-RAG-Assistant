@@ -13,6 +13,7 @@ set "PROJECT_DIR=%~dp0"
 set HOST=127.0.0.1
 set PORT=8080
 set "REDIS_EXE=E:\Redis\redis-server.exe"
+set "NEO4J_HOME=E:\neo4j-chs-community-5.26.2-windows"
 
 if not exist %PYTHON_EXE% (
     echo [ERROR] Python not found: %PYTHON_EXE%
@@ -44,6 +45,30 @@ if %errorlevel%==0 (
             echo Redis started successfully
         ) else (
             echo [WARN] Redis failed to start, falling back to local cache
+        )
+    )
+)
+echo.
+
+:: Auto-start Neo4j
+echo Checking Neo4j...
+netstat -an | findstr "7687" | findstr "LISTENING" >nul 2>&1
+if %errorlevel%==0 (
+    echo Neo4j is already running on port 7687
+) else (
+    if not exist "%NEO4J_HOME%\bin\neo4j.bat" (
+        echo [WARN] Neo4j not found: %NEO4J_HOME%
+        echo Knowledge graph will be unavailable, falling back to vector+BM25
+    ) else (
+        echo Starting Neo4j...
+        start "Neo4j" cmd /c ""%NEO4J_HOME%\bin\neo4j.bat" console"
+        echo Waiting for Neo4j to start...
+        timeout /t 15 >nul
+        netstat -an | findstr "7687" | findstr "LISTENING" >nul 2>&1
+        if %errorlevel%==0 (
+            echo Neo4j started successfully
+        ) else (
+            echo [WARN] Neo4j failed to start, falling back to vector+BM25
         )
     )
 )
