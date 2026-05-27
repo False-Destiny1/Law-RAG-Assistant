@@ -40,7 +40,7 @@ class TestCnToInt:
     def test_zero_edge_case(self):
         # "零" alone should map to 0 via the table, but _cn_to_int returns 0 for zero
         result = _cn_to_int("零")
-        assert isinstance(result, int)
+        assert result == 0
 
 
 # ─── extract_law_name ───────────────────────────────────────

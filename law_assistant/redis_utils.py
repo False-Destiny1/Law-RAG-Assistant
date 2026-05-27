@@ -5,6 +5,7 @@ import threading
 from datetime import datetime
 from typing import Optional, Any
 from functools import wraps
+from collections import defaultdict
 
 import redis
 from dotenv import load_dotenv
@@ -17,6 +18,10 @@ logger = logging.getLogger(__name__)
 _pool: Optional[redis.ConnectionPool] = None
 _redis_client: Optional[redis.Redis] = None
 _redis_lock = threading.Lock()
+
+# --- Local rate limiting fallback (when Redis is unavailable) ---
+_local_rate_limits: dict = defaultdict(int)
+_local_rate_lock = threading.Lock()
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 KEY_PREFIX = "law_assistant"
@@ -136,23 +141,49 @@ def cache_set_set(key: str, value: set, ttl: int = 3600):
 
 # --- Rate limiting ---
 
-@redis_fallback((True, 0, 999))
 def rate_limit_check(identifier: str, limit: int, window: int = 60):
     """
     Fixed-window rate limit check.
     Returns: (allowed: bool, current_count: int, remaining: int)
+    Falls back to local in-memory rate limiting when Redis is unavailable.
     """
     client = _get_client()
     if client is None:
-        return (True, 0, limit)
-    key = _key(f"ratelimit:{identifier}:{int(datetime.now().timestamp()) // window}")
-    pipe = client.pipeline()
-    pipe.incr(key)
-    pipe.expire(key, window)
-    result = pipe.execute()
-    count = result[0]
-    remaining = max(0, limit - count)
-    return (count <= limit, count, remaining)
+        # Local in-memory fallback (fixed-window counter)
+        now = datetime.now().timestamp()
+        window_key = int(now) // window
+        key = f"{identifier}:{window_key}"
+        with _local_rate_lock:
+            # Periodic cleanup: remove entries older than 2 windows
+            if len(_local_rate_limits) > 1000:
+                cutoff = int(now) // window - 2
+                stale = [k for k in _local_rate_limits if int(k.rsplit(":", 1)[-1]) < cutoff]
+                for k in stale:
+                    del _local_rate_limits[k]
+            _local_rate_limits[key] += 1
+            count = _local_rate_limits[key]
+        remaining = max(0, limit - count)
+        return (count <= limit, count, remaining)
+    try:
+        key = _key(f"ratelimit:{identifier}:{int(datetime.now().timestamp()) // window}")
+        pipe = client.pipeline()
+        pipe.incr(key)
+        pipe.expire(key, window)
+        result = pipe.execute()
+        count = result[0]
+        remaining = max(0, limit - count)
+        return (count <= limit, count, remaining)
+    except Exception as e:
+        logger.warning(f"Redis rate limit error: {e}")
+        # Same local fallback on Redis error
+        now = datetime.now().timestamp()
+        window_key = int(now) // window
+        key = f"{identifier}:{window_key}"
+        with _local_rate_lock:
+            _local_rate_limits[key] += 1
+            count = _local_rate_limits[key]
+        remaining = max(0, limit - count)
+        return (count <= limit, count, remaining)
 
 
 # --- Health check ---
@@ -167,7 +198,8 @@ def is_available() -> bool:
 
 def close_pool():
     global _pool, _redis_client
-    if _pool:
-        _pool.disconnect()
-    _redis_client = None
-    _pool = None
+    with _redis_lock:
+        if _pool:
+            _pool.disconnect()
+        _redis_client = None
+        _pool = None

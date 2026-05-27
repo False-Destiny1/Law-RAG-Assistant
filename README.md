@@ -4,7 +4,7 @@
 
 基于 RAG（Retrieval-Augmented Generation）架构的智能法律问答系统，集成了用户权限管理、多格式文档解析（含 OCR）、智能问答交互、知识库动态管理等核心模块。
 
-**技术栈：** FastAPI + PostgreSQL + Redis + FAISS + BM25 + DashScope Reranker + PaddleOCR + BAAI/bge-small-zh-v1.5 + MiMo LLM
+**技术栈：** FastAPI + PostgreSQL + Redis + FAISS + BM25 + Neo4j 知识图谱 + DashScope Reranker + PaddleOCR + BAAI/bge-small-zh-v1.5 + MiMo LLM
 
 ---
 
@@ -19,6 +19,7 @@
 - 存储 ≥ 10GB
 - PostgreSQL 16+（或使用 SQLite）
 - Redis（可选，用于缓存和限流，不安装时自动降级）
+- Neo4j（可选，用于知识图谱检索，不安装时自动降级为双路检索）
 
 **创建 Conda 环境：**
 ```bash
@@ -52,6 +53,7 @@ pip install -r requirements.txt
 | jieba | ≥0.42 | 中文分词 |
 | bcrypt | ≥4.0 | 密码加密 |
 | redis | ≥5.0 | 缓存、限流、会话管理 |
+| neo4j | ≥5.0 | 知识图谱存储与检索（可选） |
 
 **OCR 相关系统依赖：**
 ```bash
@@ -81,10 +83,17 @@ RERANKER_API_KEY=你的DashScope密钥
 RERANKER_BASE_URL=https://dashscope.aliyuncs.com/api/v1/services/reranking/reranking
 RERANKER_MODEL=gte-rerank
 
-# ── 检索权重 ──
-VECTOR_RETRIEVAL_WEIGHT=0.8
-BM25_RETRIEVAL_WEIGHT=0.2
+# ── 检索权重（三路融合）──
+VECTOR_RETRIEVAL_WEIGHT=0.4
+BM25_RETRIEVAL_WEIGHT=0.3
+GRAPH_RETRIEVAL_WEIGHT=0.3
 RELEVANCE_THRESHOLD=0.15
+
+# ── Neo4j 知识图谱（可选）──
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=你的Neo4j密码
+NEO4J_DATABASE=neo4j
 
 # ── 数据库 ──
 # PostgreSQL（推荐）
@@ -132,8 +141,25 @@ python -m uvicorn app:app --host 127.0.0.1 --port 8080
 3. 加载 `BAAI/bge-small-zh-v1.5` 嵌入模型到 GPU
 4. 扫描 `knowledge_base/` 目录，构建 FAISS 向量索引和 BM25 关键词索引
 5. 保存索引到 `law_faiss/` 和 `bm25_index.pkl`
+6. 连接 Neo4j 并创建知识图谱 Schema（如配置了 Neo4j）
 
 > 首次构建索引需要 5-10 分钟，后续启动直接加载已有索引。
+
+**构建知识图谱（首次使用 Neo4j 时需要）：**
+
+```python
+# 在 Python 交互环境或脚本中执行
+from law_assistant.rag import DeepSeekApiRag
+import os
+from dotenv import load_dotenv
+load_dotenv()
+
+api_key = os.getenv("MIMO_API_KEY")
+rag = DeepSeekApiRag(api_key)
+rag.build_knowledge_graph("knowledge_base/")
+```
+
+> 知识图谱构建需要 5-15 分钟（取决于 knowledge_base/ 中的文件数量），构建完成后会持久化存储在 Neo4j 中，后续启动无需重建。
 
 ### 第七步：访问系统
 
@@ -154,6 +180,7 @@ law_assistant-main/
 │   ├── __init__.py           # 包导出
 │   ├── rag.py                # RAG 引擎（检索、重排序、生成、记忆）
 │   ├── bm25.py               # BM25 关键词检索器（jieba 分词）
+│   ├── graph.py              # 知识图谱（规则抽取 + Neo4j 存储 + 图谱检索）
 │   ├── processor.py          # 文档处理器（法律/通用识别 + OCR 回退）
 │   ├── splitter.py           # 文本分块器（按条款/按字符）
 │   ├── memory.py             # 对话记忆管理（L1 内存 + L2 Redis + L3 DB，LRU 淘汰）
@@ -219,9 +246,9 @@ FastAPI /ask_stream (SSE 流式)
     │       ├── 查询分解（最多 3 个子查询）
     │       └── HyDE 假设性文档生成
     │
-    ├─── 并行混合检索
+    ├─── 并行三路融合检索
     │       ├── 主查询 + 子查询 + HyDE 文档
-    │       ├── 每个查询：FAISS 向量检索（权重 0.8）‖ BM25 关键词检索（权重 0.2）
+    │       ├── 每个查询：FAISS 向量检索（0.4）‖ BM25 关键词检索（0.3）‖ Neo4j 图谱检索（0.3）
     │       └── 加权融合 → 候选文档
     │
     ├─── DashScope Reranker（gte-rerank）
@@ -255,7 +282,7 @@ FastAPI /ask_stream (SSE 流式)
 | 知识库管理 | 创建/编辑/删除知识库 | 所有人 |
 | 文档上传 | PDF/DOCX/TXT/JPG/PNG，自动向量化 | 专家/管理员 |
 | OCR 识别 | 扫描版 PDF 和图片自动 PaddleOCR 文字识别 | 专家/管理员 |
-| 混合检索 | 向量语义 + BM25 关键词，并行执行 | 系统自动 |
+| 三路融合检索 | 向量语义 + BM25 关键词 + 知识图谱，并行执行 | 系统自动 |
 | 重排序 | DashScope Reranker 精排，超时自动回退 | 系统自动 |
 | 安全防护 | 提示词注入检测（输入过滤 + 上下文清洗 + 提示词加固） | 系统自动 |
 
@@ -320,3 +347,28 @@ Redis 为可选组件，不安装时系统自动降级到本地缓存和数据�
 - Windows：从 `e:\Redis\redis-server.exe` 启动，或使用 `start.bat` 自动启动
 - Docker：`docker run -d -p 6379:6379 redis:latest`
 - 安装后在 `.env` 中配置 `REDIS_URL=redis://localhost:6379/0`
+
+**Q: Neo4j 连接失败 / 知识图谱不可用**
+Neo4j 为可选组件，不安装时系统自动降级为双路检索（向量 + BM25）。如需使用知识图谱：
+
+1. 安装 Neo4j Community Edition（本地或 Docker）
+2. 在 `.env` 中配置 `NEO4J_URI`、`NEO4J_USER`、`NEO4J_PASSWORD`
+3. 安装 Python 驱动：`pip install neo4j>=5.0.0`
+4. 首次使用需构建图谱：运行 `rag.build_knowledge_graph("knowledge_base/")`
+5. 使用 `start.bat` 启动会自动启动 Neo4j（需修改脚本中的 `NEO4J_HOME` 路径）
+
+```bash
+# Docker 方式运行 Neo4j
+docker run -d --name neo4j -p 7474:7474 -p 7687:7687 -e NEO4J_AUTH=neo4j/你的密码 neo4j:5
+```
+
+**Q: 知识图谱构建后如何查看**
+
+浏览器打开 `http://localhost:7474`，用 Neo4j 账号登录，输入 Cypher 查询：
+
+```cypher
+// 查看所有法律节点
+MATCH (l:Law) RETURN l LIMIT 50
+// 查看某部法律的条文
+MATCH (l:Law {name: "民法典"})-[:CONTAINS]->(a:Article) RETURN l, a LIMIT 30
+```

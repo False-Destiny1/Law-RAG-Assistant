@@ -72,7 +72,7 @@
         <div class="card fade-in fade-in-delay-1">
             <h2>上传文档</h2>
             <form method="POST" action="/upload" enctype="multipart/form-data" id="uploadForm">
-                <input type="hidden" name="csrf_token" value="{{ request.cookies.get('csrf_token', '') }}">
+                <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
                 <div class="form-group">
                     <label class="form-label" for="kbSelect">目标知识库</label>
                     <select class="form-input" id="kbSelect" name="knowledge_base_id">
@@ -126,7 +126,7 @@
                         </div>
                     </div>
                     <form method="POST" action="/upload/{{ doc.id }}/delete" onsubmit="return confirm('确定删除此文档？');">
-                        <input type="hidden" name="csrf_token" value="{{ request.cookies.get('csrf_token', '') }}">
+                        <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
                         <button type="submit" class="btn btn-ghost btn-sm" style="color:var(--c-error);" title="删除">
                             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
                         </button>

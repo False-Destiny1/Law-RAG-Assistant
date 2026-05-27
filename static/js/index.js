@@ -1,3 +1,8 @@
+function getCsrfToken() {
+    const match = document.cookie.match(/csrf_token=([^;]+)/);
+    return match ? match[1] : '';
+}
+
 document.addEventListener('DOMContentLoaded', function() {
     // DOM
     const userInput = document.getElementById('userInput');
@@ -90,7 +95,7 @@ document.addEventListener('DOMContentLoaded', function() {
     function createNewChat() {
         return fetch('/api/chats', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': getCsrfToken() },
             body: JSON.stringify({ title: '新对话' })
         })
         .then(r => r.json())
@@ -124,7 +129,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     function deleteChat(chatId) {
-        fetch(`/api/chats/${chatId}`, { method: 'DELETE' })
+        fetch(`/api/chats/${chatId}`, { method: 'DELETE', headers: { 'X-CSRF-Token': getCsrfToken() } })
             .then(r => r.json())
             .then(() => {
                 chats = chats.filter(c => c.id !== chatId);
@@ -140,7 +145,7 @@ document.addEventListener('DOMContentLoaded', function() {
     function updateChatTitle(chatId, title) {
         fetch(`/api/chats/${chatId}`, {
             method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': getCsrfToken() },
             body: JSON.stringify({ title })
         })
         .then(r => r.json())
@@ -441,7 +446,7 @@ document.addEventListener('DOMContentLoaded', function() {
         if (currentChatId) {
             fetch(`/api/chats/${currentChatId}`, {
                 method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': getCsrfToken() },
                 body: JSON.stringify({ knowledge_base_id: kbSelector.value || null })
             }).catch(e => console.error('更新知识库失败:', e));
         }

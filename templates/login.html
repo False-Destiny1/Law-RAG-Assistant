@@ -178,7 +178,7 @@
             {% endif %}
 
             <form class="auth-form" method="POST" action="/login">
-                <input type="hidden" name="csrf_token" value="{{ request.cookies.get('csrf_token', '') }}">
+                <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
                 <div class="form-group">
                     <label class="form-label" for="identifier">手机号</label>
                     <input class="form-input" type="text" id="identifier" name="identifier"

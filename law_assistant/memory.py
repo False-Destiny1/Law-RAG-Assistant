@@ -145,7 +145,7 @@ class ConversationMemory:
             return []
         db = None
         try:
-            chat_id = int(conversation_id.replace("chat_", ""))
+            chat_id = int(conversation_id.removeprefix("chat_"))
             db = self._db_session_factory()
             Message = self._message_model
             messages = db.query(Message).filter(
@@ -163,8 +163,7 @@ class ConversationMemory:
                     'history': history,
                     'created_at': datetime.now()
                 }
-
-            self._write_to_redis(conversation_id)
+                self._write_to_redis(conversation_id)
 
             import logging
             logging.getLogger(__name__).info(f"从DB加载对话历史: {conversation_id}, {len(history)} 条消息")

@@ -71,6 +71,17 @@ class DocumentSplitter(TextSplitter):
             # 重新组合句子和其后的分隔符
             sentence_with_delim = sentence + delimiter
 
+            # 单个句子就超过限制：用 RecursiveCharacterTextSplitter 二次分割
+            if len(sentence_with_delim) > self._chunk_size:
+                if current_chunk:
+                    chunks.append(current_chunk)
+                    current_chunk = ""
+                fallback = RecursiveCharacterTextSplitter(
+                    chunk_size=self._chunk_size, chunk_overlap=self._chunk_overlap
+                )
+                chunks.extend(fallback.split_text(sentence_with_delim))
+                continue
+
             # 如果当前块加上新句子不会超过限制
             if len(current_chunk) + len(sentence_with_delim) <= self._chunk_size:
                 current_chunk += sentence_with_delim
@@ -80,9 +91,11 @@ class DocumentSplitter(TextSplitter):
                     chunks.append(current_chunk)
                     # 重叠：取上一块末尾的 N 个字符作为上下文
                     overlap_text = current_chunk[-self._chunk_overlap:] if len(current_chunk) > self._chunk_overlap else current_chunk
+                    # Ensure overlap + sentence doesn't exceed chunk_size
+                    if len(overlap_text) + len(sentence_with_delim) > self._chunk_size:
+                        overlap_text = overlap_text[:self._chunk_size - len(sentence_with_delim)]
                     current_chunk = overlap_text + sentence_with_delim
                 else:
-                    # 单个句子就超过限制，直接作为一个块
                     chunks.append(sentence_with_delim)
                     current_chunk = ""
 

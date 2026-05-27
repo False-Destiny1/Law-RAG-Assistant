@@ -68,7 +68,7 @@ def sanitize_context(text: str) -> str:
         stripped = line.strip()
         # Skip lines that look like system instructions injected into documents
         if any(p.search(stripped) for p in _COMPILED):
-            cleaned.append(f'[文档内容，已过滤可疑指令] {stripped}')
+            cleaned.append('[文档内容，已过滤可疑指令]')
         else:
             cleaned.append(line)
     return '\n'.join(cleaned)

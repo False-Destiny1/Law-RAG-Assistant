@@ -54,7 +54,7 @@
             <p class="subtitle">修改知识库的名称和描述</p>
 
             <form method="POST" action="/knowledge-base/{{ kb.id }}/edit">
-                <input type="hidden" name="csrf_token" value="{{ request.cookies.get('csrf_token', '') }}">
+                <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
                 <div class="form-group">
                     <label class="form-label" for="name">知识库名称</label>
                     <input class="form-input" type="text" id="name" name="name" value="{{ kb.name }}" required>

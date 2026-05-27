@@ -27,18 +27,21 @@ class BM25Retriever:
         return list(jieba.cut(text))
 
     def build_index(self, documents: List[str]):
-        """构建BM25索引（完整重建）"""
+        """构建BM25索引（完整重建，线程安全）"""
         if not documents:
             return
 
-        self.documents = documents
         logger.info(f"正在构建BM25索引，文档数量: {len(documents)}")
 
-        # 分词处理
-        self.tokenized_docs = [self.chinese_tokenize(doc) for doc in documents]
+        # 分词处理（CPU 密集型，在锁外执行）
+        tokenized_docs = [self.chinese_tokenize(doc) for doc in documents]
+        bm25 = BM25Okapi(tokenized_docs)
 
-        # 构建BM25模型
-        self.bm25 = BM25Okapi(self.tokenized_docs)
+        # 原子性替换索引状态
+        with self._lock:
+            self.documents = documents
+            self.tokenized_docs = tokenized_docs
+            self.bm25 = bm25
         logger.info("BM25索引构建完成")
 
     def add_documents(self, new_documents: List[str], force_rebuild: bool = False):
@@ -87,22 +90,30 @@ class BM25Retriever:
         self._rebuild_with_pending()
 
     def search(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
-        """BM25检索 — 不在搜索时强制重建索引（上传时已通过 force_rebuild 保证）"""
-        if self.bm25 is None or not self.documents:
-            # 仅在完全没有索引时才构建
-            if self.pending_documents:
-                self._rebuild_with_pending()
-            else:
-                return []
+        """BM25检索 — 线程安全"""
+        with self._lock:
+            if self.bm25 is None or not self.documents:
+                # 仅在完全没有索引时才构建
+                if self.pending_documents:
+                    pass  # will rebuild below
+                else:
+                    return []
+
+        if self.bm25 is None and self.pending_documents:
+            self._rebuild_with_pending()
 
         # 查询分词
         tokenized_query = self.chinese_tokenize(query)
 
-        # BM25评分
-        scores = self.bm25.get_scores(tokenized_query)
+        # BM25评分（在锁内读取共享状态的一致快照）
+        with self._lock:
+            if self.bm25 is None:
+                return []
+            scores = self.bm25.get_scores(tokenized_query)
+            documents = self.documents
 
         # 获取top_k结果
-        doc_scores = list(zip(self.documents, scores))
+        doc_scores = list(zip(documents, scores))
         doc_scores.sort(key=lambda x: x[1], reverse=True)
 
         return doc_scores[:top_k]
@@ -143,28 +154,29 @@ class BM25Retriever:
         return len(self.documents) + len(self.pending_documents)
 
     def remove_documents(self, target_texts: List[str]):
-        """从索引中移除包含指定文本的文档（P1: 文档删除索引同步）"""
-        if not self.documents:
-            return
+        """从索引中移除包含指定文本的文档（线程安全）"""
+        with self._lock:
+            if not self.documents:
+                return
 
-        # 先处理待处理文档
-        if self.pending_documents:
-            self.pending_documents = [d for d in self.pending_documents if d not in target_texts]
+            # 先处理待处理文档
+            if self.pending_documents:
+                self.pending_documents = [d for d in self.pending_documents if d not in target_texts]
 
-        # 从已索引文档中移除
-        target_set = set(target_texts)
-        new_documents = [d for d in self.documents if d not in target_set]
-        removed_count = len(self.documents) - len(new_documents)
+            # 从已索引文档中移除
+            target_set = set(target_texts)
+            new_documents = [d for d in self.documents if d not in target_set]
+            removed_count = len(self.documents) - len(new_documents)
 
-        if removed_count > 0:
-            self.documents = new_documents
-            # 重建索引
-            if self.documents:
-                self.tokenized_docs = [self.chinese_tokenize(doc) for doc in self.documents]
-                self.bm25 = BM25Okapi(self.tokenized_docs)
+            if removed_count > 0:
+                self.documents = new_documents
+                # 重建索引
+                if self.documents:
+                    self.tokenized_docs = [self.chinese_tokenize(doc) for doc in self.documents]
+                    self.bm25 = BM25Okapi(self.tokenized_docs)
+                else:
+                    self.bm25 = None
+                    self.tokenized_docs = []
+                logger.info(f"BM25索引已移除 {removed_count} 个文档，剩余 {len(self.documents)} 个")
             else:
-                self.bm25 = None
-                self.tokenized_docs = []
-            logger.info(f"BM25索引已移除 {removed_count} 个文档，剩余 {len(self.documents)} 个")
-        else:
-            logger.info("BM25索引中未找到需要移除的文档")
+                logger.info("BM25索引中未找到需要移除的文档")

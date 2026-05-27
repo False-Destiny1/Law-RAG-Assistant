@@ -73,14 +73,16 @@ def _generate_csrf_token(session_token: str = "") -> str:
 @app.middleware("http")
 async def csrf_middleware(request: Request, call_next):
     """Double-submit cookie CSRF protection."""
+    # Always compute and store CSRF token for template context
+    session_token = request.cookies.get("session_token", "")
+    csrf_token = _generate_csrf_token(session_token)
+    request.state.csrf_token = csrf_token
+
     # Skip safe methods and API/static endpoints
     if request.method in ("GET", "HEAD", "OPTIONS"):
         response = await call_next(request)
-        # Set CSRF cookie if not present
-        if not request.cookies.get("csrf_token"):
-            session_token = request.cookies.get("session_token", "")
-            csrf_token = _generate_csrf_token(session_token)
-            response.set_cookie("csrf_token", csrf_token, httponly=False, samesite="lax")
+        # Always set CSRF cookie to ensure it matches request.state.csrf_token
+        response.set_cookie("csrf_token", csrf_token, httponly=False, samesite="lax")
         return response
 
     # For state-changing methods, validate CSRF token
@@ -90,45 +92,58 @@ async def csrf_middleware(request: Request, call_next):
         if not cookie_token:
             return JSONResponse({"error": "CSRF token missing"}, status_code=403)
 
-        # Read form or header token
-        form_token = None
-        content_type = request.headers.get("content-type", "")
-        if "application/json" in content_type:
-            # JSON requests check X-CSRF-Token header
-            form_token = request.headers.get("X-CSRF-Token", "")
-        elif "form" in content_type:
-            # Form requests: parse body without consuming (use _form cached by Starlette)
-            try:
-                body = await request.body()
-                # Manually parse csrf_token from form body to avoid consuming stream
-                import urllib.parse
-                parsed = urllib.parse.parse_qs(body.decode("utf-8", errors="ignore"))
-                tokens = parsed.get("csrf_token", [])
-                form_token = tokens[0] if tokens else ""
-            except Exception:
-                pass
+        # Read token from header first (works for JSON, DELETE, and multipart via JS)
+        form_token = request.headers.get("X-CSRF-Token", "")
+
+        # Fallback: parse csrf_token from URL-encoded form body (not multipart — too expensive)
+        if not form_token:
+            content_type = request.headers.get("content-type", "")
+            if "application/x-www-form-urlencoded" in content_type:
+                try:
+                    body = await request.body()
+                    import urllib.parse
+                    parsed = urllib.parse.parse_qs(body.decode("utf-8", errors="ignore"))
+                    tokens = parsed.get("csrf_token", [])
+                    form_token = tokens[0] if tokens else ""
+                except Exception:
+                    pass
 
         if not form_token or not hmac.compare_digest(cookie_token, form_token):
+            # For form submissions, redirect back instead of returning JSON
+            content_type = request.headers.get("content-type", "")
+            if "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
+                referer = request.headers.get("referer", "/")
+                return RedirectResponse(url=referer, status_code=303)
             return JSONResponse({"error": "CSRF token invalid"}, status_code=403)
 
     return await call_next(request)
 
 
 def _get_rate_limit_id(request: Request) -> str:
-    """从 session cookie 提取 user_id，无 cookie 时 fallback 到 IP"""
+    """从 session cookie 提取 user_id（验证签名），无 cookie 时 fallback 到 IP"""
     token = request.cookies.get("session_token")
     if token:
         try:
             parts = token.split(":")
-            if len(parts) >= 2:
-                return f"user:{parts[0]}"
+            if len(parts) == 4:
+                user_id_str, nonce, timestamp_str, sig = parts
+                expected = hmac.new(SESSION_SECRET.encode(), f"{user_id_str}:{nonce}:{timestamp_str}".encode(), hashlib.sha256).hexdigest()[:32]
+                if hmac.compare_digest(sig, expected):
+                    return f"user:{user_id_str}"
+            elif len(parts) == 3:
+                user_id_str, nonce, sig = parts
+                expected = hmac.new(SESSION_SECRET.encode(), f"{user_id_str}:{nonce}".encode(), hashlib.sha256).hexdigest()[:32]
+                if hmac.compare_digest(sig, expected):
+                    return f"user:{user_id_str}"
         except Exception:
             pass
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        ip = forwarded.split(",")[0].strip()
-    else:
-        ip = request.client.host if request.client else "unknown"
+    # Only trust X-Forwarded-For if TRUSTED_PROXY is configured
+    if os.getenv("TRUSTED_PROXY"):
+        forwarded = request.headers.get("X-Forwarded-For")
+        if forwarded:
+            ip = forwarded.split(",")[0].strip()
+            return f"ip:{ip}"
+    ip = request.client.host if request.client else "unknown"
     return f"ip:{ip}"
 
 
@@ -289,7 +304,8 @@ def get_db():
 
 
 def create_session_token(user_id: int) -> str:
-    payload = f"{user_id}:{secrets.token_hex(16)}"
+    timestamp = str(int(datetime.now(timezone.utc).timestamp()))
+    payload = f"{user_id}:{secrets.token_hex(16)}:{timestamp}"
     signature = hmac.new(SESSION_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()[:32]
     return f"{payload}:{signature}"
 
@@ -300,12 +316,24 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> Optiona
         return None
     try:
         parts = token.split(":")
-        if len(parts) != 3:
-            return None
-        user_id_str, nonce, sig = parts
-        expected = hmac.new(SESSION_SECRET.encode(), f"{user_id_str}:{nonce}".encode(), hashlib.sha256).hexdigest()[:32]
-        if not hmac.compare_digest(sig, expected):
-            return None
+        if len(parts) != 4:
+            # Backward compat: accept old 3-part tokens (no timestamp)
+            if len(parts) == 3:
+                user_id_str, nonce, sig = parts
+                expected = hmac.new(SESSION_SECRET.encode(), f"{user_id_str}:{nonce}".encode(), hashlib.sha256).hexdigest()[:32]
+                if not hmac.compare_digest(sig, expected):
+                    return None
+            else:
+                return None
+        else:
+            user_id_str, nonce, timestamp_str, sig = parts
+            expected = hmac.new(SESSION_SECRET.encode(), f"{user_id_str}:{nonce}:{timestamp_str}".encode(), hashlib.sha256).hexdigest()[:32]
+            if not hmac.compare_digest(sig, expected):
+                return None
+            # Server-side expiry check
+            token_age_hours = (datetime.now(timezone.utc).timestamp() - int(timestamp_str)) / 3600
+            if token_age_hours > SESSION_EXPIRE_HOURS:
+                return None
 
         user_id = int(user_id_str)
 
@@ -334,7 +362,7 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> Optiona
                     "phone": user.phone,
                     "username": user.username,
                     "role": user.role,
-                }, ttl=3600)
+                }, ttl=300)
             except Exception:
                 pass
         return user
@@ -403,6 +431,42 @@ def initialize_vector_database():
     else:
         print("向量数据库已存在，跳过初始化构建")
 
+    # BM25 索引独立检查：如果 FAISS 存在但 BM25 索引缺失，单独构建 BM25
+    if not os.path.exists("bm25_index.pkl"):
+        print("BM25 索引不存在，开始构建...")
+        all_texts = []
+        # 处理 knowledge_base 文件夹
+        if os.path.exists(KNOWLEDGE_BASE_FOLDER) and os.listdir(KNOWLEDGE_BASE_FOLDER):
+            for filename in os.listdir(KNOWLEDGE_BASE_FOLDER):
+                file_path = os.path.join(KNOWLEDGE_BASE_FOLDER, filename)
+                if os.path.isfile(file_path):
+                    try:
+                        pages = rag_model.document_processor._load_documents(file_path)
+                        documents = rag_model.general_splitter.split_documents(pages)
+                        all_texts.extend([d.page_content for d in documents])
+                    except Exception as e:
+                        print(f"处理文档 {filename} 失败: {e}")
+        # 处理已上传的文档
+        db = SessionLocal()
+        try:
+            all_docs = db.query(UploadedDocument).all()
+            for doc in all_docs:
+                if os.path.exists(doc.file_path):
+                    try:
+                        pages = rag_model.document_processor._load_documents(doc.file_path)
+                        documents = rag_model.general_splitter.split_documents(pages)
+                        all_texts.extend([d.page_content for d in documents])
+                    except Exception as e:
+                        print(f"处理文档 {doc.filename} 失败: {e}")
+        finally:
+            db.close()
+        if all_texts:
+            rag_model.bm25_retriever.build_index(all_texts)
+            rag_model.bm25_retriever.save_index()
+            print(f"BM25 索引构建完成，文档数量: {len(all_texts)}")
+        else:
+            print("无文档可构建 BM25 索引")
+
 
 initialize_vector_database()
 
@@ -461,7 +525,8 @@ def login_submit(
     token = create_session_token(user.id)
     response = RedirectResponse(url="/", status_code=303)
     max_age = SESSION_EXPIRE_HOURS * 3600 if remember else None
-    response.set_cookie("session_token", token, httponly=True, max_age=max_age, samesite="lax", secure=True)
+    is_production = os.getenv("ENV", "").lower() == "production"
+    response.set_cookie("session_token", token, httponly=True, max_age=max_age, samesite="lax", secure=is_production)
     return response
 
 
@@ -623,6 +688,8 @@ async def upload_submit(
         return RedirectResponse(url="/", status_code=303)
 
     allowed_extensions = {"pdf", "docx", "txt", "jpg", "jpeg", "png", "bmp", "tiff"}
+    if not file.filename:
+        return RedirectResponse(url="/upload", status_code=303)
     file_ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
     if file_ext not in allowed_extensions:
         return RedirectResponse(url="/upload", status_code=303)
@@ -776,15 +843,19 @@ def get_knowledge_bases_api(user: User = Depends(require_user), db: Session = De
 def set_retrieval_weights(
     vector_weight: float = Form(...),
     bm25_weight: float = Form(...),
+    graph_weight: float = Form(0.3),
     user: User = Depends(require_user),
 ):
     if user.role != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
-    if vector_weight + bm25_weight <= 0:
+    if vector_weight < 0 or bm25_weight < 0 or graph_weight < 0:
+        raise HTTPException(status_code=400, detail="权重不能为负数")
+    if vector_weight + bm25_weight + graph_weight <= 0:
         raise HTTPException(status_code=400, detail="权重之和必须大于 0")
-    # 使用 setattr 原子性更新（Python 的 GIL 保证单个属性赋值是原子的）
-    rag_model.vector_weight, rag_model.bm25_weight = vector_weight, bm25_weight
-    return {"vector_weight": vector_weight, "bm25_weight": bm25_weight}
+    rag_model.vector_weight = vector_weight
+    rag_model.bm25_weight = bm25_weight
+    rag_model.graph_weight = graph_weight
+    return {"vector_weight": vector_weight, "bm25_weight": bm25_weight, "graph_weight": graph_weight}
 
 
 # ── Streaming chat ──────────────────────────────────────────────────
@@ -864,7 +935,8 @@ async def ask_stream(request: Request, user: User = Depends(require_user), db: S
 
             yield 'data: {"done": true}\n\n'
         except Exception as e:
-            error_msg = f"抱歉，生成回复时出现错误: {str(e)}"
+            logger.error(f"生成回复时出现错误: {e}", exc_info=True)
+            error_msg = "抱歉，生成回复时出现错误，请稍后重试"
             rag_model.save_bot_response(conversation_id, error_msg)
             yield f'data: {_json.dumps({"error": error_msg}, ensure_ascii=False)}\n\n'
             yield 'data: {"done": true}\n\n'

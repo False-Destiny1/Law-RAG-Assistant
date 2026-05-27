@@ -9,6 +9,7 @@ import json
 import hashlib
 import logging
 import numpy as np
+import atexit
 import concurrent.futures
 from typing import Dict, List, Tuple, Optional
 from dotenv import load_dotenv
@@ -25,6 +26,7 @@ load_dotenv()
 
 # Shared thread pool for concurrent retrieval (avoids creating a new pool per query)
 _SHARED_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=8)
+atexit.register(_SHARED_EXECUTOR.shutdown, wait=False)
 
 
 class DeepSeekApiRag:
@@ -143,6 +145,11 @@ class DeepSeekApiRag:
         if os.path.exists(db_path):
             logger.info(f"加载已存在的向量数据库: {db_path}")
             self.load_vector_db()
+            # 生成完整性哈希文件（首次运行时缺失）
+            hash_file = os.path.join(db_path, ".hash")
+            if not os.path.exists(hash_file):
+                self._save_faiss_hash()
+                logger.info("已生成 FAISS 索引完整性哈希文件")
 
         # 尝试加载BM25索引
         # 尝试加载BM25索引
@@ -443,7 +450,7 @@ class DeepSeekApiRag:
         """校验 FAISS 索引文件完整性"""
         hash_file = os.path.join(self.db_path, ".hash")
         if not os.path.exists(hash_file):
-            logger.warning("FAISS 索引无哈希文件，跳过完整性校验")
+            logger.info("FAISS 索引无哈希文件，跳过完整性校验")
             return True
         with open(hash_file, 'r') as f:
             expected = f.read().strip()
@@ -518,27 +525,31 @@ class DeepSeekApiRag:
         return results
 
     def hybrid_retrieve_documents(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
-        """三路融合检索：向量检索 + BM25 检索 + 图谱检索（并行执行）"""
+        """三路融合检索：向量检索 + BM25 检索 + 图谱检索（顺序执行，外层 retrieve_documents 已并行）"""
         all_results = []
 
-        # 向量检索和 BM25 检索并行执行（使用共享线程池）
-        vector_future = _SHARED_EXECUTOR.submit(self._vector_search, query, top_k)
-        bm25_future = _SHARED_EXECUTOR.submit(self._bm25_search, query, top_k)
-        graph_future = _SHARED_EXECUTOR.submit(self._graph_search, query, top_k)
-        all_results.extend(vector_future.result())
-        bm25_res = bm25_future.result()
+        # 顺序执行三种检索（避免嵌套线程池死锁，外层已通过线程池并行多个查询）
+        vector_results = self._vector_search(query, top_k)
+        all_results.extend(vector_results)
+        bm25_res = self._bm25_search(query, top_k)
         all_results.extend(bm25_res)
-        graph_res = graph_future.result()
+        graph_res = self._graph_search(query, top_k)
         all_results.extend(graph_res)
-        logger.info(f"向量检索返回 {sum(1 for _,_,m in all_results if m=='vector')} 个结果")
+        logger.info(f"向量检索返回 {len(vector_results)} 个结果")
         logger.info(f"BM25检索返回 {len(bm25_res)} 个结果")
         logger.info(f"图谱检索返回 {len(graph_res)} 个结果")
 
         # 结果融合（加权求和）
+        vector_w, bm25_w, graph_w = self.vector_weight, self.bm25_weight, self.graph_weight
+        if not self.knowledge_graph.is_available:
+            # Neo4j 不可用时重新归一化权重到 1.0
+            total = vector_w + bm25_w
+            if total > 0:
+                vector_w, bm25_w = vector_w / total, bm25_w / total
         weight_map = {
-            "vector": self.vector_weight,
-            "bm25": self.bm25_weight,
-            "graph": self.graph_weight,
+            "vector": vector_w,
+            "bm25": bm25_w,
+            "graph": graph_w,
         }
         fused_results = {}
         for doc, score, method in all_results:
@@ -653,7 +664,15 @@ class DeepSeekApiRag:
                     try:
                         chunks = self.document_processor.process_document(path)
                         for c in chunks:
-                            texts.add(c['full_text'])
+                            full_text = c['full_text']
+                            # Apply same sub-splitting as add_file_documents
+                            if c.get('metadata', {}).get('source') == 'legal_document' and len(full_text) > 500:
+                                legal_splitter = DocumentSplitter(chunk_size=400, chunk_overlap=30)
+                                sub_chunks = legal_splitter.split_text(full_text)
+                                for sc in sub_chunks:
+                                    texts.add(sc)
+                            else:
+                                texts.add(full_text)
                     except Exception as e:
                         logger.warning(f"知识库文档处理失败 {path}: {e}")
             self._kb_texts_cache[knowledge_base_id] = texts
@@ -739,9 +758,6 @@ class DeepSeekApiRag:
             for i, (doc, score) in enumerate(retrieved_docs):
                 safe_doc = sanitize_context(doc)
                 context_parts.append(f"【来源{i + 1}】(相关度:{score:.2f}): {safe_doc}")
-
-        if conversation_history:
-            context_parts.append(conversation_history)
 
         context = "\n\n".join(context_parts) if context_parts else "无相关上下文"
 

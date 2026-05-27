@@ -510,8 +510,9 @@ class LegalKnowledgeGraph:
         if not self.is_available:
             return {}
         stats = {}
+        _VALID_LABELS = {"Law", "Chapter", "Article", "Concept"}
         with self._driver.session(database=self._database) as session:
-            for label in ["Law", "Chapter", "Article", "Concept"]:
+            for label in _VALID_LABELS:
                 rec = session.run(f"MATCH (n:{label}) RETURN count(n) AS cnt").single()
                 stats[label] = rec["cnt"]
             rec = session.run("MATCH ()-[r]->() RETURN count(r) AS cnt").single()

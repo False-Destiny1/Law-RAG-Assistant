@@ -35,7 +35,7 @@ def main():
 
     # 离线测试（不需要服务器）
     offline_tests = [
-        "test_ocr.py",
+        "../manual/test_ocr.py",
     ]
 
     # 在线测试（需要服务器运行）
