@@ -9,10 +9,13 @@ class ConversationMemory:
 
     MAX_CACHED_CONVERSATIONS = 500
 
-    def __init__(self, max_history_turns: int = 5):
+    def __init__(self, max_history_turns: int = 5, db_session_factory=None, message_model=None):
         self.max_history_turns = max_history_turns
         self.conversations = OrderedDict()
         self._lock = threading.Lock()
+        # 依赖注入：DB session 工厂和 Message 模型（避免从 app.py 循环导入）
+        self._db_session_factory = db_session_factory
+        self._message_model = message_model
 
     def _serialize_history(self, history: list) -> list:
         """将历史记录序列化为 JSON 兼容格式"""
@@ -82,8 +85,8 @@ class ConversationMemory:
             if len(conversation['history']) > max_messages:
                 conversation['history'] = conversation['history'][-max_messages:]
 
-        # Write-through to Redis（锁外执行，避免持锁做 I/O）
-        self._write_to_redis(conversation_id)
+            # Write-through to Redis（锁内执行，避免与 clear_conversation 的 TOCTOU 竞态）
+            self._write_to_redis(conversation_id)
 
     def get_recent_history(self, conversation_id: str) -> List[dict]:
         """获取最近的对话历史（优先内存 → Redis → DB）"""
@@ -98,8 +101,10 @@ class ConversationMemory:
             cached = cache_get_json(f"conv:{conversation_id}")
             if cached and 'history' in cached:
                 history = self._deserialize_history(cached['history'])
-                # 回填 L1
+                # 回填 L1（放在末尾，标记为最近使用）
                 with self._lock:
+                    if len(self.conversations) >= self.MAX_CACHED_CONVERSATIONS:
+                        self.conversations.popitem(last=False)
                     self.conversations[conversation_id] = {
                         'history': history,
                         'created_at': datetime.now()
@@ -135,13 +140,14 @@ class ConversationMemory:
             pass
 
     def _load_from_db(self, conversation_id: str) -> List[dict]:
-        """从数据库加载对话历史（回退方案）"""
+        """从数据库加载对话历史（回退方案，使用注入的 DB 工厂）"""
+        if not self._db_session_factory or not self._message_model:
+            return []
         db = None
         try:
-            # conversation_id 格式: "chat_{id}"
             chat_id = int(conversation_id.replace("chat_", ""))
-            from app import get_db, Message
-            db = next(get_db())
+            db = self._db_session_factory()
+            Message = self._message_model
             messages = db.query(Message).filter(
                 Message.chat_id == chat_id
             ).order_by(Message.created_at.desc()).limit(self.max_history_turns * 2).all()
@@ -149,24 +155,23 @@ class ConversationMemory:
             if not messages:
                 return []
 
-            # 反转为时间正序
             messages = list(reversed(messages))
             history = [{'role': msg.role, 'content': msg.content, 'timestamp': msg.created_at} for msg in messages]
 
-            # 缓存到内存
             with self._lock:
                 self.conversations[conversation_id] = {
                     'history': history,
                     'created_at': datetime.now()
                 }
 
-            # Write-through to Redis
             self._write_to_redis(conversation_id)
 
-            print(f"从DB加载对话历史: {conversation_id}, {len(history)} 条消息")
+            import logging
+            logging.getLogger(__name__).info(f"从DB加载对话历史: {conversation_id}, {len(history)} 条消息")
             return history
         except Exception as e:
-            print(f"从DB加载对话历史失败: {e}")
+            import logging
+            logging.getLogger(__name__).warning(f"从DB加载对话历史失败: {e}")
             return []
         finally:
             if db:

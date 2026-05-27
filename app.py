@@ -3,6 +3,7 @@ import uuid
 import secrets
 import hmac
 import hashlib
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -19,6 +20,14 @@ from law_assistant.rag import DeepSeekApiRag
 from law_assistant.security import check_injection
 
 load_dotenv()
+
+# 配置结构化日志
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
 import json as _json
 
@@ -43,7 +52,62 @@ async def security_headers(request: Request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+        "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+        "font-src 'self' https://cdn.jsdelivr.net; "
+        "img-src 'self' data:; "
+        "connect-src 'self'"
+    )
     return response
+
+
+def _generate_csrf_token(session_token: str = "") -> str:
+    """Generate a CSRF token from session + secret."""
+    payload = f"{session_token}:{SESSION_SECRET}"
+    return hashlib.sha256(payload.encode()).hexdigest()[:32]
+
+
+@app.middleware("http")
+async def csrf_middleware(request: Request, call_next):
+    """Double-submit cookie CSRF protection."""
+    # Skip safe methods and API/static endpoints
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        response = await call_next(request)
+        # Set CSRF cookie if not present
+        if not request.cookies.get("csrf_token"):
+            session_token = request.cookies.get("session_token", "")
+            csrf_token = _generate_csrf_token(session_token)
+            response.set_cookie("csrf_token", csrf_token, httponly=False, samesite="lax")
+        return response
+
+    # For state-changing methods, validate CSRF token
+    # Skip CSRF for /ask_stream (SSE endpoint, protected by session cookie + samesite)
+    if request.url.path not in ("/ask_stream",):
+        cookie_token = request.cookies.get("csrf_token", "")
+        if not cookie_token:
+            return JSONResponse({"error": "CSRF token missing"}, status_code=403)
+
+        # Read form or header token
+        form_token = None
+        content_type = request.headers.get("content-type", "")
+        if "application/json" in content_type:
+            # JSON requests check X-CSRF-Token header
+            form_token = request.headers.get("X-CSRF-Token", "")
+        elif "form" in content_type:
+            # Form requests check csrf_token field
+            try:
+                form = await request.form()
+                form_token = form.get("csrf_token", "")
+            except Exception:
+                pass
+
+        if not form_token or not hmac.compare_digest(cookie_token, form_token):
+            return JSONResponse({"error": "CSRF token invalid"}, status_code=403)
+
+    return await call_next(request)
 
 
 def _get_rate_limit_id(request: Request) -> str:
@@ -91,7 +155,13 @@ async def rate_limit_middleware(request: Request, call_next):
         response.headers["X-RateLimit-Limit"] = str(limit)
         response.headers["X-RateLimit-Remaining"] = str(remaining)
         return response
-    except Exception:
+    except ImportError:
+        # Redis 模块不可用，跳过限流
+        return await call_next(request)
+    except Exception as e:
+        # Redis 连接失败等运行时异常，跳过限流但记录日志
+        import logging
+        logging.getLogger(__name__).warning(f"限流中间件异常，跳过限流: {e}")
         return await call_next(request)
 
 
@@ -296,6 +366,9 @@ os.makedirs(KNOWLEDGE_BASE_FOLDER, exist_ok=True)
 def initialize_vector_database():
     global rag_model
     rag_model = DeepSeekApiRag(api_key, db_path)
+    # 注入 ORM 依赖（避免 law_assistant 包循环导入 app.py）
+    rag_model.set_knowledge_base_model(KnowledgeBase)
+    rag_model.set_memory_db_factory(SessionLocal, Message)
 
     if not os.path.exists(db_path):
         print("向量数据库不存在，开始构建...")
@@ -336,11 +409,19 @@ def ensure_admin_exists():
     try:
         admin = db.query(User).filter(User.role == "admin").first()
         if not admin:
+            admin_password = os.getenv("ADMIN_PASSWORD")
+            if not admin_password:
+                admin_password = secrets.token_urlsafe(16)
+                print(f"WARNING: ADMIN_PASSWORD 未设置，已生成随机密码: {admin_password}")
+                _env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+                if os.path.exists(_env_path):
+                    with open(_env_path, "a", encoding="utf-8") as _f:
+                        _f.write(f"\nADMIN_PASSWORD={admin_password}\n")
             admin_user = User(phone="admin", username="管理员", role="admin")
-            admin_user.set_password("admin123")
+            admin_user.set_password(admin_password)
             db.add(admin_user)
             db.commit()
-            print("已创建默认管理员账号: admin / admin123")
+            print("已创建默认管理员账号 (密码已写入 .env)")
         else:
             print(f"管理员账号已存在: {admin.phone}")
     finally:
@@ -376,8 +457,7 @@ def login_submit(
     token = create_session_token(user.id)
     response = RedirectResponse(url="/", status_code=303)
     max_age = SESSION_EXPIRE_HOURS * 3600 if remember else None
-    is_production = os.getenv("ENV", "").lower() == "production"
-    response.set_cookie("session_token", token, httponly=True, max_age=max_age, samesite="lax", secure=is_production)
+    response.set_cookie("session_token", token, httponly=True, max_age=max_age, samesite="lax", secure=True)
     return response
 
 
@@ -420,10 +500,11 @@ def register_submit(
     return RedirectResponse(url="/login?registered=1", status_code=303)
 
 
-@app.get("/logout")
+@app.post("/logout")
 def logout():
     response = RedirectResponse(url="/login", status_code=303)
     response.delete_cookie("session_token")
+    response.delete_cookie("csrf_token")
     return response
 
 
@@ -544,10 +625,10 @@ async def upload_submit(
 
     filename = f"{uuid.uuid4()}.{file_ext}"
     file_path = os.path.join(UPLOAD_FOLDER, filename)
-    MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 50MB
+    MAX_UPLOAD_SIZE = 20 * 1024 * 1024  # 20MB
     content = await file.read()
     if len(content) > MAX_UPLOAD_SIZE:
-        return JSONResponse({"error": "文件大小超过50MB限制"}, status_code=413)
+        return JSONResponse({"error": "文件大小超过20MB限制"}, status_code=413)
     with open(file_path, "wb") as f:
         f.write(content)
 
@@ -697,8 +778,8 @@ def set_retrieval_weights(
         raise HTTPException(status_code=403, detail="Admin only")
     if vector_weight + bm25_weight <= 0:
         raise HTTPException(status_code=400, detail="权重之和必须大于 0")
-    rag_model.vector_weight = vector_weight
-    rag_model.bm25_weight = bm25_weight
+    # 使用 setattr 原子性更新（Python 的 GIL 保证单个属性赋值是原子的）
+    rag_model.vector_weight, rag_model.bm25_weight = vector_weight, bm25_weight
     return {"vector_weight": vector_weight, "bm25_weight": bm25_weight}
 
 

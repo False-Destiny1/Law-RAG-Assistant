@@ -1,7 +1,7 @@
 import os
 import json
-import pickle
 import logging
+import threading
 from datetime import datetime
 from typing import Optional, Any
 from functools import wraps
@@ -13,36 +13,40 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-# --- Connection Pool (lazy singleton) ---
+# --- Connection Pool (lazy singleton, thread-safe) ---
 _pool: Optional[redis.ConnectionPool] = None
 _redis_client: Optional[redis.Redis] = None
+_redis_lock = threading.Lock()
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 KEY_PREFIX = "law_assistant"
 
 
 def _get_client() -> Optional[redis.Redis]:
-    """Get or create the Redis client. Returns None if Redis is unavailable."""
+    """Get or create the Redis client (thread-safe via double-checked locking)."""
     global _pool, _redis_client
     if _redis_client is not None:
         return _redis_client
-    try:
-        _pool = redis.ConnectionPool.from_url(
-            REDIS_URL,
-            max_connections=20,
-            decode_responses=False,
-            socket_timeout=2,
-            socket_connect_timeout=2,
-            retry_on_timeout=True,
-        )
-        _redis_client = redis.Redis(connection_pool=_pool)
-        _redis_client.ping()
-        logger.info(f"Redis connected: {REDIS_URL}")
-        return _redis_client
-    except Exception as e:
-        logger.warning(f"Redis unavailable, falling back to local behavior: {e}")
-        _redis_client = None
-        return None
+    with _redis_lock:
+        if _redis_client is not None:
+            return _redis_client
+        try:
+            _pool = redis.ConnectionPool.from_url(
+                REDIS_URL,
+                max_connections=20,
+                decode_responses=False,
+                socket_timeout=2,
+                socket_connect_timeout=2,
+                retry_on_timeout=True,
+            )
+            _redis_client = redis.Redis(connection_pool=_pool)
+            _redis_client.ping()
+            logger.info(f"Redis connected: {REDIS_URL}")
+            return _redis_client
+        except Exception as e:
+            logger.warning(f"Redis unavailable, falling back to local behavior: {e}")
+            _redis_client = None
+            return None
 
 
 def _key(suffix: str) -> str:
@@ -107,25 +111,27 @@ def cache_delete_pattern(pattern: str):
             break
 
 
-# --- Pickle helpers (for complex objects like sets) ---
+# --- JSON helpers for complex objects (replaces pickle for security) ---
 
 @redis_fallback(None)
-def cache_get_pickle(key: str) -> Optional[Any]:
+def cache_get_set(key: str) -> Optional[set]:
+    """Load a set stored as a JSON array. Returns None on miss."""
     client = _get_client()
     if client is None:
         return None
     data = client.get(_key(key))
     if data is None:
         return None
-    return pickle.loads(data)
+    return set(json.loads(data))
 
 
 @redis_fallback()
-def cache_set_pickle(key: str, value: Any, ttl: int = 3600):
+def cache_set_set(key: str, value: set, ttl: int = 3600):
+    """Store a set as a JSON array."""
     client = _get_client()
     if client is None:
         return
-    client.setex(_key(key), ttl, pickle.dumps(value))
+    client.setex(_key(key), ttl, json.dumps(list(value), ensure_ascii=False))
 
 
 # --- Rate limiting ---

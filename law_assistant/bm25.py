@@ -1,9 +1,13 @@
 import os
-import pickle
+import json
+import logging
+import threading
 from typing import List, Tuple
 
 import jieba
 from rank_bm25 import BM25Okapi
+
+logger = logging.getLogger(__name__)
 
 
 class BM25Retriever:
@@ -16,6 +20,7 @@ class BM25Retriever:
         self.tokenized_docs = []
         self.pending_documents = []  # 待添加文档缓存
         self.rebuild_threshold = rebuild_threshold  # 积累多少文档后重建索引
+        self._lock = threading.Lock()  # 保护 pending_documents 和索引状态
 
     def chinese_tokenize(self, text: str) -> List[str]:
         """中文分词"""
@@ -27,53 +32,55 @@ class BM25Retriever:
             return
 
         self.documents = documents
-        print(f"正在构建BM25索引，文档数量: {len(documents)}")
+        logger.info(f"正在构建BM25索引，文档数量: {len(documents)}")
 
         # 分词处理
         self.tokenized_docs = [self.chinese_tokenize(doc) for doc in documents]
 
         # 构建BM25模型
         self.bm25 = BM25Okapi(self.tokenized_docs)
-        print("BM25索引构建完成")
+        logger.info("BM25索引构建完成")
 
     def add_documents(self, new_documents: List[str], force_rebuild: bool = False):
-        """添加文档（智能批量处理）"""
+        """添加文档（智能批量处理，线程安全）"""
         if not new_documents:
             return
 
-        # 添加到待处理队列
-        self.pending_documents.extend(new_documents)
-        print(f"已缓存 {len(new_documents)} 个文档，待处理文档总数: {len(self.pending_documents)}")
+        with self._lock:
+            # 添加到待处理队列
+            self.pending_documents.extend(new_documents)
+            logger.info(f"已缓存 {len(new_documents)} 个文档，待处理文档总数: {len(self.pending_documents)}")
 
-        # 判断是否需要重建索引
-        should_rebuild = (force_rebuild or
-                          len(self.pending_documents) >= self.rebuild_threshold or
-                          self.bm25 is None)
+            # 判断是否需要重建索引
+            should_rebuild = (force_rebuild or
+                              len(self.pending_documents) >= self.rebuild_threshold or
+                              self.bm25 is None)
 
         if should_rebuild:
             self._rebuild_with_pending()
 
     def _rebuild_with_pending(self):
-        """使用待处理文档重建索引"""
-        if not self.pending_documents and self.bm25 is not None:
-            return
+        """使用待处理文档重建索引（需在 self._lock 外调用，内部自行加锁）"""
+        with self._lock:
+            if not self.pending_documents and self.bm25 is not None:
+                return
 
-        # 合并所有文档
-        all_documents = self.documents + self.pending_documents
+            # 合并所有文档
+            all_documents = self.documents + self.pending_documents
 
-        if not all_documents:
-            return
+            if not all_documents:
+                return
 
-        print(f"正在重建BM25索引，总文档数: {len(all_documents)}")
+            # 清空待处理队列（先清空再构建，构建可能耗时）
+            pending_count = len(self.pending_documents)
+            self.pending_documents = []
 
-        # 重新构建索引
+        logger.info(f"正在重建BM25索引，总文档数: {len(all_documents)}")
+
+        # 重新构建索引（CPU 密集型，在锁外执行）
         self.build_index(all_documents)
 
-        # 清空待处理队列
-        pending_count = len(self.pending_documents)
-        self.pending_documents = []
-
-        print(f"索引重建完成，新增 {pending_count} 个文档")
+        logger.info(f"索引重建完成，新增 {pending_count} 个文档")
 
     def force_rebuild(self):
         """强制立即重建索引"""
@@ -101,36 +108,34 @@ class BM25Retriever:
         return doc_scores[:top_k]
 
     def save_index(self):
-        """保存BM25索引（包含待处理文档）"""
-        # 先确保所有文档都已索引
+        """保存BM25索引（JSON格式，不存储pickle对象）"""
         if self.pending_documents:
             self._rebuild_with_pending()
 
         if self.bm25 is not None:
-            with open(self.bm25_index_path, 'wb') as f:
-                pickle.dump({
-                    'bm25': self.bm25,
+            with open(self.bm25_index_path, 'w', encoding='utf-8') as f:
+                json.dump({
                     'documents': self.documents,
                     'tokenized_docs': self.tokenized_docs
-                }, f)
-            print(f"BM25索引已保存到: {self.bm25_index_path}")
+                }, f, ensure_ascii=False)
+            logger.info(f"BM25索引已保存到: {self.bm25_index_path}")
 
     def load_index(self) -> bool:
-        """加载BM25索引"""
+        """加载BM25索引（从JSON重建BM25Okapi）"""
         if not os.path.exists(self.bm25_index_path):
             return False
 
         try:
-            with open(self.bm25_index_path, 'rb') as f:
-                data = pickle.load(f)
-                self.bm25 = data['bm25']
-                self.documents = data['documents']
-                self.tokenized_docs = data['tokenized_docs']
-                self.pending_documents = []  # 加载时清空待处理队列
-            print(f"BM25索引已从 {self.bm25_index_path} 加载，文档数: {len(self.documents)}")
+            with open(self.bm25_index_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            self.documents = data['documents']
+            self.tokenized_docs = data['tokenized_docs']
+            self.bm25 = BM25Okapi(self.tokenized_docs) if self.tokenized_docs else None
+            self.pending_documents = []
+            logger.info(f"BM25索引已从 {self.bm25_index_path} 加载，文档数: {len(self.documents)}")
             return True
         except Exception as e:
-            print(f"加载BM25索引失败: {e}")
+            logger.warning(f"加载BM25索引失败: {e}")
             return False
 
     def get_document_count(self) -> int:
@@ -160,6 +165,6 @@ class BM25Retriever:
             else:
                 self.bm25 = None
                 self.tokenized_docs = []
-            print(f"BM25索引已移除 {removed_count} 个文档，剩余 {len(self.documents)} 个")
+            logger.info(f"BM25索引已移除 {removed_count} 个文档，剩余 {len(self.documents)} 个")
         else:
-            print("BM25索引中未找到需要移除的文档")
+            logger.info("BM25索引中未找到需要移除的文档")

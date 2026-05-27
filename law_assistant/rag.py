@@ -3,8 +3,11 @@ from langchain_community.vectorstores.faiss import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.documents import Document
 import os
+import re
 import yaml
 import json
+import hashlib
+import logging
 import numpy as np
 import concurrent.futures
 from typing import List, Tuple, Optional
@@ -14,6 +17,8 @@ from law_assistant.bm25 import BM25Retriever
 from law_assistant.memory import ConversationMemory
 from law_assistant.processor import DocumentProcessor
 from law_assistant.security import sanitize_context
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -28,14 +33,14 @@ class DeepSeekApiRag:
             db_path = os.getenv("VECTOR_DB_PATH", "law_faiss")
 
         # 1. 初始化嵌入模型
-        print("正在加载嵌入模型...")
+        logger.info("正在加载嵌入模型...")
         embedding_provider = os.getenv("EMBEDDING_PROVIDER", "dashscope").lower()
         if embedding_provider == "dashscope":
             embedding_api_key = os.getenv("EMBEDDING_API_KEY")
             embedding_base_url = os.getenv("EMBEDDING_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
             embedding_model_name = os.getenv("EMBEDDING_MODEL", "text-embedding-v2")
             fallback_model_name = os.getenv("EMBEDDING_FALLBACK_MODEL", "text-embedding-async-v2")
-            print(f"使用 DashScope 嵌入模型: {embedding_model_name} (回退: {fallback_model_name})")
+            logger.info(f"使用 DashScope 嵌入模型: {embedding_model_name} (回退: {fallback_model_name})")
             self.embedding_model = OpenAIEmbeddings(
                 api_key=embedding_api_key,
                 base_url=embedding_base_url,
@@ -61,7 +66,7 @@ class DeepSeekApiRag:
                 local_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), embedding_model_name)
                 if os.path.isdir(local_path):
                     model_path = local_path
-            print(f"使用本地嵌入模型: {model_path}")
+            logger.info(f"使用本地嵌入模型: {model_path}")
             self.embedding_model = HuggingFaceEmbeddings(
                 model_name=model_path,
                 model_kwargs={'device': 'cuda'},
@@ -74,7 +79,7 @@ class DeepSeekApiRag:
         if mimo_api_key:
             mimo_base_url = os.getenv("MIMO_BASE_URL", "https://token-plan-cn.xiaomimimo.com/v1")
             mimo_model = os.getenv("MIMO_MODEL", "mimo-v2.5-pro")
-            print(f"正在初始化 MiMo API (模型: {mimo_model})...")
+            logger.info(f"正在初始化 MiMo API (模型: {mimo_model})...")
             self.llm = ChatOpenAI(
                 api_key=mimo_api_key,
                 base_url=mimo_base_url,
@@ -84,7 +89,7 @@ class DeepSeekApiRag:
             deepseek_api_key = api_key or os.getenv("DEEPSEEK_API_KEY")
             deepseek_base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
             deepseek_model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
-            print(f"正在初始化 DeepSeek API (模型: {deepseek_model})...")
+            logger.info(f"正在初始化 DeepSeek API (模型: {deepseek_model})...")
             self.llm = ChatOpenAI(
                 api_key=deepseek_api_key,
                 base_url=deepseek_base_url,
@@ -109,6 +114,8 @@ class DeepSeekApiRag:
 
         # 7. 初始化记忆模块
         self.memory = ConversationMemory(max_history_turns=5)
+        # 知识库模型类（由 app.py 注入，避免循环导入）
+        self._knowledge_base_model = None
 
         # 8. 检索权重配置
         self.vector_weight = float(os.getenv("VECTOR_RETRIEVAL_WEIGHT", "0.6"))
@@ -125,15 +132,15 @@ class DeepSeekApiRag:
 
         # 如果向量数据库已存在，直接加载
         if os.path.exists(db_path):
-            print(f"加载已存在的向量数据库: {db_path}")
+            logger.info(f"加载已存在的向量数据库: {db_path}")
             self.load_vector_db()
 
         # 尝试加载BM25索引
         # 尝试加载BM25索引
         if not self.bm25_retriever.load_index():
-            print("BM25索引不存在，将在添加文档时构建")
+            logger.info("BM25索引不存在，将在添加文档时构建")
         else:
-            print(f"BM25索引加载成功，文档数量: {self.bm25_retriever.get_document_count()}")
+            logger.info(f"BM25索引加载成功，文档数量: {self.bm25_retriever.get_document_count()}")
 
     def _load_all_prompts(self) -> dict:
         """启动时一次性加载所有 prompt 模板"""
@@ -144,7 +151,7 @@ class DeepSeekApiRag:
             raise FileNotFoundError(f"提示词文件不存在: {prompts_path}")
         with open(prompts_path, 'r', encoding='utf-8') as file:
             prompts = yaml.safe_load(file)
-        print(f"已缓存 {len(prompts)} 个 prompt 模板")
+        logger.info(f"已缓存 {len(prompts)} 个 prompt 模板")
         return prompts
 
     def _load_prompt(self, prompt_name: str = "legal_advisor_prompt") -> str:
@@ -177,7 +184,7 @@ class DeepSeekApiRag:
             return [(doc, 0.0) for doc in documents[:top_k]]
 
         if not self.reranker_api_key:
-            print("未设置 Reranker API 密钥，跳过重排序")
+            logger.warning("未设置 Reranker API 密钥，跳过重排序")
             return _fallback()
 
         try:
@@ -200,7 +207,7 @@ class DeepSeekApiRag:
                 try:
                     response = future.result(timeout=10)
                 except concurrent.futures.TimeoutError:
-                    print("Reranker API 超时 (10s)，跳过重排序")
+                    logger.warning("Reranker API 超时 (10s)，跳过重排序")
                     return _fallback()
 
             if response.status_code == 200:
@@ -212,14 +219,14 @@ class DeepSeekApiRag:
                     if idx < len(documents):
                         reranked.append((documents[idx], score))
                 reranked.sort(key=lambda x: x[1], reverse=True)
-                print(f"Reranker 返回 {len(reranked)} 个结果")
+                logger.info(f"Reranker 返回 {len(reranked)} 个结果")
                 return reranked[:top_k]
             else:
-                print(f"Reranker 返回错误: {response.status_code} {response.output}")
+                logger.warning(f"Reranker 返回错误: {response.status_code} {response.output}")
                 return _fallback()
 
         except Exception as e:
-            print(f"Reranker 调用失败: {e}")
+            logger.warning(f"Reranker 调用失败: {e}")
             return _fallback()
 
     def _embed_with_retry(self, texts: List[str], max_retries: int = 3) -> List[List[float]]:
@@ -231,22 +238,22 @@ class DeepSeekApiRag:
                 return self.embedding_model.embed_documents(texts)
             except Exception as e:
                 err_str = str(e)
-                print(f"主嵌入模型错误: {err_str[:200]}")
+                logger.warning(f"主嵌入模型错误: {err_str[:200]}")
                 wait_time = (2 ** attempt) * 2
-                print(f"等待 {wait_time} 秒后重试 (第 {attempt + 1}/{max_retries} 次)...")
+                logger.info(f"等待 {wait_time} 秒后重试 (第 {attempt + 1}/{max_retries} 次)...")
                 time.sleep(wait_time)
 
         # 主模型失败，尝试回退模型
         if self.fallback_embedding_model:
-            print("主嵌入模型失败，切换到回退模型...")
+            logger.warning("主嵌入模型失败，切换到回退模型...")
             for attempt in range(max_retries):
                 try:
                     return self.fallback_embedding_model.embed_documents(texts)
                 except Exception as e:
                     err_str = str(e)
-                    print(f"回退嵌入模型错误: {err_str[:200]}")
+                    logger.warning(f"回退嵌入模型错误: {err_str[:200]}")
                     wait_time = (2 ** attempt) * 2
-                    print(f"等待 {wait_time} 秒后重试 (第 {attempt + 1}/{max_retries} 次)...")
+                    logger.info(f"等待 {wait_time} 秒后重试 (第 {attempt + 1}/{max_retries} 次)...")
                     time.sleep(wait_time)
 
         raise RuntimeError("所有嵌入模型均调用失败")
@@ -274,7 +281,6 @@ class DeepSeekApiRag:
             content = response.content.strip()
             # 提取 JSON（兼容 markdown code block 包裹）
             if "```" in content:
-                import re
                 match = re.search(r'\{[\s\S]*\}', content)
                 if match:
                     content = match.group()
@@ -282,14 +288,14 @@ class DeepSeekApiRag:
             rewritten = result.get("rewritten_query", query)
             sub_queries = result.get("sub_queries", [rewritten])
             hypothetical = result.get("hypothetical_doc", "")
-            print(f"查询分析: 原始='{query}' → 改写='{rewritten}', 子查询={len(sub_queries)}个, HyDE={'有' if hypothetical else '无'}")
+            logger.info(f"查询分析: 原始='{query}' → 改写='{rewritten}', 子查询={len(sub_queries)}个, HyDE={'有' if hypothetical else '无'}")
             return {
                 "rewritten_query": rewritten if len(rewritten) > 3 else query,
                 "sub_queries": [q for q in sub_queries if len(q) > 3] or [rewritten],
                 "hypothetical_doc": hypothetical
             }
         except Exception as e:
-            print(f"查询分析失败，使用原始查询: {e}")
+            logger.warning(f"查询分析失败，使用原始查询: {e}")
             return {"rewritten_query": query, "sub_queries": [query], "hypothetical_doc": ""}
 
     def add_documents(self, documents: List[str], save_to_disk: bool = True):
@@ -297,7 +303,7 @@ class DeepSeekApiRag:
         if not documents:
             return
 
-        print(f"正在向向量数据库添加 {len(documents)} 个文档块...")
+        logger.info(f"正在向向量数据库添加 {len(documents)} 个文档块...")
 
         # 手动生成嵌入向量并确保是numpy数组格式
         embeddings = self._embed_with_retry(documents)
@@ -308,15 +314,12 @@ class DeepSeekApiRag:
             raise ValueError(f"嵌入维度不正确，期望2D数组，得到{embeddings_array.shape}")
 
         if self.vector_db is None:
-            # 使用FAISS.from_embeddings方法
-            docs = [Document(page_content=text) for text in documents]
-
             self.vector_db = FAISS.from_embeddings(
                 text_embeddings=list(zip(documents, embeddings_array)),
                 embedding=self.embedding_model,
                 metadatas=[{} for _ in documents]
             )
-            print(f"FAISS 数据库已初始化，包含 {len(documents)} 个文档块。")
+            logger.info(f"FAISS 数据库已初始化，包含 {len(documents)} 个文档块。")
         else:
             # 如果向量数据库已存在，添加新文档
             self.vector_db.add_texts(documents, embeddings=embeddings_array)
@@ -328,11 +331,11 @@ class DeepSeekApiRag:
             self.save_vector_db()
             self.bm25_retriever.save_index()
 
-        print(
+        logger.info(
             f"文档添加完成 - 向量数据库: {self.get_document_count()} 个文档, BM25索引: {self.bm25_retriever.get_document_count()} 个文档")
     def add_file_documents(self, file_path: str, save_to_disk: bool = True):
         """添加单个文件文档"""
-        print(f"正在处理文档: {file_path}")
+        logger.info(f"正在处理文档: {file_path}")
 
         try:
             # 使用文档处理器自动识别类型并处理
@@ -351,7 +354,7 @@ class DeepSeekApiRag:
                 else:
                     texts_to_add.append(full_text)
 
-            print(f"从文档中提取了 {len(structured_chunks)} 个结构化块，生成 {len(texts_to_add)} 个文本块")
+            logger.info(f"从文档中提取了 {len(structured_chunks)} 个结构化块，生成 {len(texts_to_add)} 个文本块")
 
             # 添加到向量数据库（不立即保存BM25，下面统一强制重建）
             self.add_documents(texts_to_add, save_to_disk=False)
@@ -364,13 +367,13 @@ class DeepSeekApiRag:
                 self.bm25_retriever.save_index()
 
         except Exception as e:
-            print(f"文档处理失败: {e}")
+            logger.warning(f"文档处理失败: {e}")
             # 回退到普通分块
             self._fallback_add_documents(file_path, save_to_disk)
 
     def _fallback_add_documents(self, file_path: str, save_to_disk: bool = True):
         """回退到普通分块策略"""
-        print(f"使用普通分块策略处理: {file_path}")
+        logger.info(f"使用普通分块策略处理: {file_path}")
 
         # 统一通过 DocumentProcessor 加载（支持 OCR 回退）
         pages = self.document_processor._load_documents(file_path)
@@ -389,14 +392,14 @@ class DeepSeekApiRag:
         supported_extensions = ('.pdf', '.doc', '.docx', '.txt', '.jpg', '.jpeg', '.png', '.bmp', '.tiff')
 
         if not os.path.exists(folder_path):
-            print(f"文件夹不存在: {folder_path}")
+            logger.warning(f"文件夹不存在: {folder_path}")
             return
 
         file_count = 0
         for filename in os.listdir(folder_path):
             if filename.lower().endswith(supported_extensions):
                 file_path = os.path.join(folder_path, filename)
-                print(f"正在处理文件: {file_path}")
+                logger.info(f"正在处理文件: {file_path}")
                 self.add_file_documents(file_path, save_to_disk=False)
                 time.sleep(1)
                 file_count += 1
@@ -409,20 +412,52 @@ class DeepSeekApiRag:
             self.save_vector_db()
             self.bm25_retriever.save_index()
 
+    def _compute_faiss_hash(self) -> str:
+        """计算 FAISS 索引目录中所有文件的 SHA256 哈希"""
+        hash_sha256 = hashlib.sha256()
+        for fname in sorted(os.listdir(self.db_path)):
+            fpath = os.path.join(self.db_path, fname)
+            if os.path.isfile(fpath) and fname != ".hash":
+                with open(fpath, 'rb') as f:
+                    for chunk in iter(lambda: f.read(8192), b''):
+                        hash_sha256.update(chunk)
+        return hash_sha256.hexdigest()
+
+    def _save_faiss_hash(self):
+        """保存 FAISS 索引的完整性哈希"""
+        hash_file = os.path.join(self.db_path, ".hash")
+        digest = self._compute_faiss_hash()
+        with open(hash_file, 'w') as f:
+            f.write(digest)
+
+    def _verify_faiss_hash(self) -> bool:
+        """校验 FAISS 索引文件完整性"""
+        hash_file = os.path.join(self.db_path, ".hash")
+        if not os.path.exists(hash_file):
+            logger.warning("FAISS 索引无哈希文件，跳过完整性校验")
+            return True
+        with open(hash_file, 'r') as f:
+            expected = f.read().strip()
+        actual = self._compute_faiss_hash()
+        return expected == actual
+
     def save_vector_db(self):
-        """保存向量数据库到本地"""
+        """保存向量数据库到本地（附带完整性哈希）"""
         if self.vector_db is not None:
             self.vector_db.save_local(self.db_path)
-            print(f"向量数据库已保存到: {self.db_path}")
+            self._save_faiss_hash()
+            logger.info(f"向量数据库已保存到: {self.db_path}")
 
     def load_vector_db(self):
-        """从本地加载向量数据库"""
+        """从本地加载向量数据库（先校验文件完整性）"""
+        if not self._verify_faiss_hash():
+            raise RuntimeError(f"FAISS 索引文件完整性校验失败: {self.db_path}，文件可能被篡改")
         self.vector_db = FAISS.load_local(
             self.db_path,
             self.embedding_model,
             allow_dangerous_deserialization=True
         )
-        print(f"向量数据库已从 {self.db_path} 加载")
+        logger.info(f"向量数据库已从 {self.db_path} 加载")
 
     def _vector_search(self, query: str, top_k: int) -> List[Tuple[str, float, str]]:
         """向量检索（归一化分数）"""
@@ -439,7 +474,7 @@ class DeepSeekApiRag:
                     normalized = (max_s - score) / (max_s - min_s) if max_s != min_s else 1.0
                     results.append((doc.page_content, normalized, "vector"))
         except Exception as e:
-            print(f"向量检索失败: {e}")
+            logger.warning(f"向量检索失败: {e}")
         return results
 
     def _bm25_search(self, query: str, top_k: int) -> List[Tuple[str, float, str]]:
@@ -455,7 +490,7 @@ class DeepSeekApiRag:
                     normalized = (score - min_s) / (max_s - min_s) if max_s != min_s else 1.0
                     results.append((doc, normalized, "bm25"))
         except Exception as e:
-            print(f"BM25检索失败: {e}")
+            logger.warning(f"BM25检索失败: {e}")
         return results
 
     def hybrid_retrieve_documents(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
@@ -468,8 +503,8 @@ class DeepSeekApiRag:
         all_results.extend(vector_future.result())
         bm25_res = bm25_future.result()
         all_results.extend(bm25_res)
-        print(f"向量检索返回 {sum(1 for _,_,m in all_results if m=='vector')} 个结果")
-        print(f"BM25检索返回 {len(bm25_res)} 个结果")
+        logger.info(f"向量检索返回 {sum(1 for _,_,m in all_results if m=='vector')} 个结果")
+        logger.info(f"BM25检索返回 {len(bm25_res)} 个结果")
 
         # 3. 结果融合（加权求和）
         fused_results = {}
@@ -485,7 +520,7 @@ class DeepSeekApiRag:
         sorted_results = sorted(fused_results.items(), key=lambda x: x[1], reverse=True)
 
         final_results = [(doc, score) for doc, score in sorted_results[:int(top_k * 1.5)]]
-        print(f"混合检索融合后返回 {len(final_results)} 个结果")
+        logger.info(f"混合检索融合后返回 {len(final_results)} 个结果")
 
         return final_results
 
@@ -519,10 +554,10 @@ class DeepSeekApiRag:
                     if doc not in all_candidates or score > all_candidates[doc]:
                         all_candidates[doc] = score
             except Exception as e:
-                print(f"子查询检索失败: {e}")
+                logger.warning(f"子查询检索失败: {e}")
 
         if not all_candidates:
-            print("混合检索未返回任何结果")
+            logger.info("混合检索未返回任何结果")
             return []
 
         # P13: 知识库过滤 — 如果指定了知识库，只保留属于该知识库的文档
@@ -532,7 +567,7 @@ class DeepSeekApiRag:
                 kb_set = set(kb_doc_contents)
                 before_count = len(all_candidates)
                 all_candidates = {doc: score for doc, score in all_candidates.items() if doc in kb_set}
-                print(f"知识库过滤: {before_count} → {len(all_candidates)} (kb_id={knowledge_base_id})")
+                logger.info(f"知识库过滤: {before_count} → {len(all_candidates)} (kb_id={knowledge_base_id})")
 
         # 按分数排序取 top candidates
         sorted_candidates = sorted(all_candidates.items(), key=lambda x: x[1], reverse=True)
@@ -547,10 +582,10 @@ class DeepSeekApiRag:
         if self.relevance_threshold > 0:
             filtered = [(doc, score) for doc, score in reranked_docs if score >= self.relevance_threshold]
             if len(filtered) < len(reranked_docs):
-                print(f"相关性过滤: {len(reranked_docs)} → {len(filtered)} (阈值={self.relevance_threshold})")
+                logger.info(f"相关性过滤: {len(reranked_docs)} → {len(filtered)} (阈值={self.relevance_threshold})")
             reranked_docs = filtered
 
-        print(f"重排序后返回 {len(reranked_docs)} 个最终结果")
+        logger.info(f"重排序后返回 {len(reranked_docs)} 个最终结果")
         return reranked_docs
 
     def _get_knowledge_base_texts(self, knowledge_base_id: int, db_session) -> set:
@@ -561,17 +596,20 @@ class DeepSeekApiRag:
 
         # L2: Redis
         try:
-            from law_assistant.redis_utils import cache_get_pickle
-            cached = cache_get_pickle(f"kb_texts:{knowledge_base_id}")
+            from law_assistant.redis_utils import cache_get_set
+            cached = cache_get_set(f"kb_texts:{knowledge_base_id}")
             if cached is not None:
                 self._kb_texts_cache[knowledge_base_id] = cached
                 return cached
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Redis 缓存读取失败 (kb_texts:{knowledge_base_id}): {e}")
 
         # L3: 从 DB + 文件重建
         try:
-            from app import KnowledgeBase
+            if not self._knowledge_base_model:
+                logger.warning("知识库模型未注入，无法从 DB 重建缓存")
+                return set()
+            KnowledgeBase = self._knowledge_base_model
             kb = db_session.query(KnowledgeBase).filter(KnowledgeBase.id == knowledge_base_id).first()
             if not kb:
                 return set()
@@ -584,19 +622,28 @@ class DeepSeekApiRag:
                         for c in chunks:
                             texts.add(c['full_text'])
                     except Exception as e:
-                        print(f"知识库文档处理失败 {path}: {e}")
+                        logger.warning(f"知识库文档处理失败 {path}: {e}")
             self._kb_texts_cache[knowledge_base_id] = texts
             # Write-through to Redis
             try:
-                from law_assistant.redis_utils import cache_set_pickle
-                cache_set_pickle(f"kb_texts:{knowledge_base_id}", texts, ttl=7200)
-            except Exception:
-                pass
-            print(f"已缓存知识库 {knowledge_base_id} 的 {len(texts)} 个文本块")
+                from law_assistant.redis_utils import cache_set_set
+                cache_set_set(f"kb_texts:{knowledge_base_id}", texts, ttl=7200)
+            except Exception as e:
+                logger.warning(f"Redis 缓存写入失败 (kb_texts:{knowledge_base_id}): {e}")
+            logger.info(f"已缓存知识库 {knowledge_base_id} 的 {len(texts)} 个文本块")
             return texts
         except Exception as e:
-            print(f"获取知识库文本失败: {e}")
+            logger.warning(f"获取知识库文本失败: {e}")
             return set()
+
+    def set_knowledge_base_model(self, model_class):
+        """注入知识库 ORM 模型类（由 app.py 调用，避免循环导入）"""
+        self._knowledge_base_model = model_class
+
+    def set_memory_db_factory(self, db_session_factory, message_model):
+        """注入 DB session 工厂和 Message 模型到对话记忆模块"""
+        self.memory._db_session_factory = db_session_factory
+        self.memory._message_model = message_model
 
     def invalidate_kb_cache(self, knowledge_base_id: int = None):
         """文档增删后调用，清除缓存（内存 + Redis）"""
@@ -605,15 +652,15 @@ class DeepSeekApiRag:
             try:
                 from law_assistant.redis_utils import cache_delete_pattern
                 cache_delete_pattern("kb_texts:*")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Redis 缓存清除失败 (kb_texts:*): {e}")
         else:
             self._kb_texts_cache.pop(knowledge_base_id, None)
             try:
                 from law_assistant.redis_utils import cache_delete
                 cache_delete(f"kb_texts:{knowledge_base_id}")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Redis 缓存清除失败 (kb_texts:{knowledge_base_id}): {e}")
 
     def generate_response_stream(self, query: str, conversation_id: str = None, top_k: int = 10,
                                  prompt_name: str = "legal_advisor_prompt",
@@ -649,7 +696,7 @@ class DeepSeekApiRag:
                 db_session=db_session
             )
         except Exception as e:
-            print(f"文档检索失败，使用空上下文: {e}")
+            logger.warning(f"文档检索失败，使用空上下文: {e}")
             retrieved_docs = []
 
         # 构建上下文（带引用编号）

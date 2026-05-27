@@ -16,7 +16,7 @@ class DocumentProcessor:
         self._ocr_engine = None  # 延迟加载 PaddleOCR
 
     def is_legal_document(self, file_path: str) -> bool:
-        """判断是否为法律文档"""
+        """判断是否为法律文档（独立使用时会加载文件，推荐用 process_document 避免重复加载）"""
         filename = os.path.basename(file_path)
         legal_keywords = ['法', '条例', '规定', '办法', '细则', '章程', '规范', '法律']
         filename_lower = filename.lower()
@@ -26,14 +26,28 @@ class DocumentProcessor:
             if keyword in filename_lower:
                 return True
 
-        # 如果文件名无法判断，可以进一步检查文件内容
+        # 如果文件名无法判断，检查文件内容
         try:
             content = self._load_file_content(file_path)
-            # 检查内容中是否包含法律特征
             if self._has_legal_characteristics(content):
                 return True
         except Exception:
             pass
+
+        return False
+
+    def _is_legal_content(self, file_path: str, content: str) -> bool:
+        """基于文件名和已加载内容判断是否为法律文档（不重复加载文件）"""
+        filename = os.path.basename(file_path)
+        legal_keywords = ['法', '条例', '规定', '办法', '细则', '章程', '规范', '法律']
+        filename_lower = filename.lower()
+
+        for keyword in legal_keywords:
+            if keyword in filename_lower:
+                return True
+
+        if self._has_legal_characteristics(content):
+            return True
 
         return False
 
@@ -42,8 +56,7 @@ class DocumentProcessor:
         legal_patterns = [
             r'第[零一二三四五六七八九十百千万\d]+条',
             r'《[^》]+》',
-            r'第一章|第二章|第三章|第四章|第五章|第六章|第七章|第八章|第九章|第十章',
-            r'第一条|第二条|第三条|第四条|第五条'
+            r'第[零一二三四五六七八九十百千\d]+[章节]',
         ]
 
         for pattern in legal_patterns:
@@ -107,7 +120,7 @@ class DocumentProcessor:
         return avg_chars < 50
 
     def _pdf_to_images(self, file_path: str) -> list:
-        """将 PDF 页面转换为 PIL Image 列表（逐页转换避免 OOM）"""
+        """将 PDF 页面转换为 PIL Image 列表"""
         try:
             from pdf2image import convert_from_path
         except ImportError:
@@ -116,7 +129,8 @@ class DocumentProcessor:
                 "请运行: pip install pdf2image"
             )
         try:
-            # 逐页转换，避免一次性加载所有页到内存
+            # 注意: convert_from_path 会一次性加载所有页面到内存
+            # 对于大型 PDF (>100页) 可能消耗大量内存
             images = convert_from_path(file_path, dpi=200, fmt='png')
             return images
         except Exception as e:
@@ -174,29 +188,38 @@ class DocumentProcessor:
         return [Document(page_content=text, metadata={"source": file_path, "page": 0})]
 
     def process_document(self, file_path: str) -> List[Dict[str, Any]]:
-        """处理文档，自动识别类型并采用相应分块策略"""
-        if self.is_legal_document(file_path):
-            return self.process_legal_document(file_path)
+        """处理文档，自动识别类型并采用相应分块策略（文件只加载一次）"""
+        # 一次性加载文档
+        documents = self._load_documents(file_path)
+        content = "\n".join([doc.page_content for doc in documents])
+
+        # 基于已加载内容判断类型（避免二次加载）
+        if self._is_legal_content(file_path, content):
+            return self._process_legal_from_docs(documents)
         else:
-            return self.process_general_document(file_path)
+            return self._process_general_from_docs(documents)
 
     def process_legal_document(self, file_path: str) -> List[Dict[str, Any]]:
-        """处理法律文档，返回结构化的条款"""
-
-        # 加载文档
+        """处理法律文档，返回结构化的条款（独立使用）"""
         documents = self._load_documents(file_path)
-        structured_articles = []
+        return self._process_legal_from_docs(documents)
 
+    def _process_legal_from_docs(self, documents: list) -> List[Dict[str, Any]]:
+        """从已加载的文档列表中提取结构化法律条款"""
+        structured_articles = []
         for doc in documents:
             content = doc.page_content
             articles = self._extract_structured_articles(content)
             structured_articles.extend(articles)
-
         return structured_articles
 
     def process_general_document(self, file_path: str) -> List[Dict[str, Any]]:
-        """处理普通文档"""
+        """处理普通文档（独立使用）"""
         documents = self._load_documents(file_path)
+        return self._process_general_from_docs(documents)
+
+    def _process_general_from_docs(self, documents: list) -> List[Dict[str, Any]]:
+        """从已加载的文档列表中生成通用分块"""
         chunks = self.general_splitter.split_documents(documents)
 
         structured_chunks = []

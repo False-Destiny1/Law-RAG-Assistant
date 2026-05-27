@@ -158,6 +158,7 @@
             {% endif %}
 
             <form class="auth-form" method="POST" action="/register">
+                <input type="hidden" name="csrf_token" value="{{ request.cookies.get('csrf_token', '') }}">
                 <div class="form-group">
                     <label class="form-label" for="phone">手机号</label>
                     <input class="form-input" type="text" id="phone" name="phone"

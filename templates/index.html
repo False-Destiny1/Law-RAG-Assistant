@@ -53,9 +53,12 @@
                     <div class="user-role">{% if user.role == 'admin' %}管理员{% elif user.role == 'expert' %}专家{% else %}用户{% endif %}</div>
                 </div>
             </div>
-            <a href="/logout" class="btn btn-ghost btn-sm" title="退出登录">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
-            </a>
+            <form method="POST" action="/logout" style="display:inline">
+                <input type="hidden" name="csrf_token" value="{{ request.cookies.get('csrf_token', '') }}">
+                <button type="submit" class="btn btn-ghost btn-sm" title="退出登录">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+                </button>
+            </form>
         </div>
     </aside>
 
