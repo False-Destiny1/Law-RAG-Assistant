@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import threading
 
 import numpy as np
 import yaml
@@ -17,7 +18,7 @@ from law_assistant.bm25 import BM25Retriever
 from law_assistant.graph import LegalKnowledgeGraph
 from law_assistant.memory import ConversationMemory
 from law_assistant.processor import DocumentProcessor
-from law_assistant.security import sanitize_context
+from law_assistant.security import check_injection, sanitize_context
 from law_assistant.splitter import DocumentSplitter, GeneralDocumentSplitter
 
 logger = logging.getLogger(__name__)
@@ -138,6 +139,10 @@ class DeepSeekApiRag:
 
         # 11. 知识库文档文本缓存（首次访问时填充，文档增删时失效）
         self._kb_texts_cache: dict = {}  # kb_id -> set of texts
+        self._KB_CACHE_MAX_SIZE = 50  # 最多缓存 50 个知识库
+
+        # 12. FAISS 写操作锁（保护并发写入安全）
+        self._faiss_write_lock = threading.Lock()
 
         # 如果向量数据库已存在，直接加载
         if os.path.exists(db_path):
@@ -149,7 +154,6 @@ class DeepSeekApiRag:
                 self._save_faiss_hash()
                 logger.info("已生成 FAISS 索引完整性哈希文件")
 
-        # 尝试加载BM25索引
         # 尝试加载BM25索引
         if not self.bm25_retriever.load_index():
             logger.info("BM25索引不存在，将在添加文档时构建")
@@ -317,7 +321,7 @@ class DeepSeekApiRag:
 
         logger.info(f"正在向向量数据库添加 {len(documents)} 个文档块...")
 
-        # 手动生成嵌入向量并确保是numpy数组格式
+        # 手动生成嵌入向量（在锁外执行，避免长时间持锁）
         embeddings = self._embed_with_retry(documents)
         embeddings_array = np.array(embeddings, dtype=np.float32)
 
@@ -325,16 +329,17 @@ class DeepSeekApiRag:
         if len(embeddings_array.shape) != 2:
             raise ValueError(f"嵌入维度不正确，期望2D数组，得到{embeddings_array.shape}")
 
-        if self.vector_db is None:
-            self.vector_db = FAISS.from_embeddings(
-                text_embeddings=list(zip(documents, embeddings_array, strict=False)),
-                embedding=self.embedding_model,
-                metadatas=[{} for _ in documents],
-            )
-            logger.info(f"FAISS 数据库已初始化，包含 {len(documents)} 个文档块。")
-        else:
-            # 如果向量数据库已存在，添加新文档
-            self.vector_db.add_texts(documents, embeddings=embeddings_array)
+        with self._faiss_write_lock:
+            if self.vector_db is None:
+                self.vector_db = FAISS.from_embeddings(
+                    text_embeddings=list(zip(documents, embeddings_array, strict=False)),
+                    embedding=self.embedding_model,
+                    metadatas=[{} for _ in documents],
+                )
+                logger.info(f"FAISS 数据库已初始化，包含 {len(documents)} 个文档块。")
+            else:
+                # 如果向量数据库已存在，添加新文档
+                self.vector_db.add_texts(documents, embeddings=embeddings_array)
 
         # 使用增量添加
         self.bm25_retriever.add_documents(documents)
@@ -458,10 +463,11 @@ class DeepSeekApiRag:
 
     def save_vector_db(self):
         """保存向量数据库到本地（附带完整性哈希）"""
-        if self.vector_db is not None:
-            self.vector_db.save_local(self.db_path)
-            self._save_faiss_hash()
-            logger.info(f"向量数据库已保存到: {self.db_path}")
+        with self._faiss_write_lock:
+            if self.vector_db is not None:
+                self.vector_db.save_local(self.db_path)
+                self._save_faiss_hash()
+                logger.info(f"向量数据库已保存到: {self.db_path}")
 
     def load_vector_db(self):
         """从本地加载向量数据库（先校验文件完整性）"""
@@ -675,6 +681,11 @@ class DeepSeekApiRag:
                                 texts.add(full_text)
                     except Exception as e:
                         logger.warning(f"知识库文档处理失败 {path}: {e}")
+            # LRU 淘汰：缓存满时移除最早写入的条目
+            if len(self._kb_texts_cache) >= self._KB_CACHE_MAX_SIZE:
+                evict_key = next(iter(self._kb_texts_cache))
+                del self._kb_texts_cache[evict_key]
+                logger.debug(f"缓存淘汰知识库 {evict_key}")
             self._kb_texts_cache[knowledge_base_id] = texts
             # Write-through to Redis
             try:
@@ -728,14 +739,10 @@ class DeepSeekApiRag:
     ):
         """生成RAG回答（带记忆、查询分析、HyDE、引用溯源）"""
         # Defense-in-depth: 再次检查注入（防止其他入口绕过 app.py 层）
-        from law_assistant.security import check_injection
-
         safe, reason = check_injection(query)
         if not safe:
-            import json as _safe_json
-
             def _reject():
-                yield f"data: {_safe_json.dumps({'error': reason}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'error': reason}, ensure_ascii=False)}\n\n"
                 yield 'data: {"done": true}\n\n'
 
             return {"stream": _reject(), "context": "", "retrieved_documents": [], "conversation_id": conversation_id}
@@ -801,18 +808,3 @@ class DeepSeekApiRag:
         if self.vector_db is None:
             return 0
         return self.vector_db.index.ntotal if hasattr(self.vector_db.index, "ntotal") else 0
-
-    def get_bm25_document_count(self) -> int:
-        """获取BM25索引中的文档数量"""
-        return self.bm25_retriever.get_document_count()
-
-    def build_knowledge_graph(self, folder_path: str) -> dict[str, int]:
-        """从文件夹批量构建知识图谱"""
-        if not self.knowledge_graph.is_available:
-            logger.warning("知识图谱不可用，无法构建")
-            return {}
-        return self.knowledge_graph.build_from_folder(folder_path)
-
-    def get_graph_stats(self) -> dict[str, int]:
-        """获取知识图谱统计"""
-        return self.knowledge_graph.get_stats()

@@ -38,11 +38,6 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     // ── Sidebar toggle ──
-    if (sidebarToggle) {
-        sidebarToggle.addEventListener('click', function() {
-            sidebar.classList.toggle('collapsed');
-        });
-    }
     if (mobileMenuBtn) {
         mobileMenuBtn.addEventListener('click', function() {
             sidebar.classList.toggle('open');

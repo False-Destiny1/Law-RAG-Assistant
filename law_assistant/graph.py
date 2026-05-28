@@ -556,13 +556,3 @@ class LegalKnowledgeGraph:
             rec = session.run("MATCH ()-[r]->() RETURN count(r) AS cnt").single()
             stats["relationships"] = rec["cnt"]
         return stats
-
-    # ─── 清空图谱 ──────────────────────────────────────────
-
-    def clear(self):
-        """清空所有节点和关系（危险操作）"""
-        if not self.is_available:
-            return
-        with self._driver.session(database=self._database) as session:
-            session.run("MATCH (n) DETACH DELETE n")
-        logger.info("知识图谱已清空")

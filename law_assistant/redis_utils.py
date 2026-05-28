@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 _pool: redis.ConnectionPool | None = None
 _redis_client: redis.Redis | None = None
 _redis_lock = threading.Lock()
+_last_connect_failure: float = 0.0  # timestamp of last connection failure
+_RECONNECT_COOLDOWN = 30  # seconds to wait before retrying connection
 
 # --- Local rate limiting fallback (when Redis is unavailable) ---
 _local_rate_limits: dict = defaultdict(int)
@@ -28,10 +30,16 @@ KEY_PREFIX = "law_assistant"
 
 
 def _get_client() -> redis.Redis | None:
-    """Get or create the Redis client (thread-safe via double-checked locking)."""
-    global _pool, _redis_client
+    """Get or create the Redis client (thread-safe, with reconnect cooldown)."""
+    global _pool, _redis_client, _last_connect_failure
     if _redis_client is not None:
         return _redis_client
+
+    # Cooldown: don't retry connection too frequently after failure
+    now = datetime.now().timestamp()
+    if _last_connect_failure and (now - _last_connect_failure) < _RECONNECT_COOLDOWN:
+        return None
+
     with _redis_lock:
         if _redis_client is not None:
             return _redis_client
@@ -46,11 +54,14 @@ def _get_client() -> redis.Redis | None:
             )
             _redis_client = redis.Redis(connection_pool=_pool)
             _redis_client.ping()
+            _last_connect_failure = 0.0
             logger.info(f"Redis connected: {REDIS_URL}")
             return _redis_client
         except Exception as e:
+            _last_connect_failure = datetime.now().timestamp()
             logger.warning(f"Redis unavailable, falling back to local behavior: {e}")
             _redis_client = None
+            _pool = None
             return None
 
 

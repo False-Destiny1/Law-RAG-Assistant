@@ -58,8 +58,6 @@ cover/
 # Django stuff:
 *.log
 local_settings.py
-db.sqlite3
-db.sqlite3-journal
 
 # Flask stuff:
 instance/
@@ -208,11 +206,11 @@ __marimo__/
 
 # Project-specific
 BAAI/bge-small-zh-v1.5/
+BAAI/bge-reranker-v2-m3/
 law_faiss/
 bm25_index.pkl
 uploads/
 instance/
 baseline_results.json
-user.db
 .claude/
 .superpowers/

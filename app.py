@@ -14,7 +14,7 @@ from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import Column, DateTime, ForeignKey, Index, Integer, String, Text, create_engine
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text, create_engine
 from sqlalchemy import text as _text
 from sqlalchemy.orm import Session, declarative_base, joinedload, relationship, sessionmaker, subqueryload
 
@@ -158,37 +158,32 @@ async def rate_limit_middleware(request: Request, call_next):
         return await call_next(request)
     try:
         from law_assistant.redis_utils import rate_limit_check
-
-        identifier = _get_rate_limit_id(request)
-        path = request.url.path
-        if path.startswith("/ask_stream"):
-            limit = 30
-        elif path.startswith("/api/"):
-            limit = 60
-        elif path in ("/login", "/register") and request.method == "POST":
-            limit = 10
-        else:
-            limit = 120
-        allowed, count, remaining = rate_limit_check(identifier, limit, window=60)
-        if not allowed:
-            return JSONResponse(
-                {"error": "请求过于频繁，请稍后再试"},
-                status_code=429,
-                headers={"Retry-After": "60", "X-RateLimit-Remaining": "0"},
-            )
-        response = await call_next(request)
-        response.headers["X-RateLimit-Limit"] = str(limit)
-        response.headers["X-RateLimit-Remaining"] = str(remaining)
-        return response
     except ImportError:
-        # Redis 模块不可用，跳过限流
+        # redis_utils 模块缺失（极端情况），跳过限流
         return await call_next(request)
-    except Exception as e:
-        # Redis 连接失败等运行时异常，跳过限流但记录日志
-        import logging
 
-        logging.getLogger(__name__).warning(f"限流中间件异常，跳过限流: {e}")
-        return await call_next(request)
+    identifier = _get_rate_limit_id(request)
+    path = request.url.path
+    if path.startswith("/ask_stream"):
+        limit = 30
+    elif path.startswith("/api/"):
+        limit = 60
+    elif path in ("/login", "/register") and request.method == "POST":
+        limit = 10
+    else:
+        limit = 120
+
+    allowed, count, remaining = rate_limit_check(identifier, limit, window=60)
+    if not allowed:
+        return JSONResponse(
+            {"error": "请求过于频繁，请稍后再试"},
+            status_code=429,
+            headers={"Retry-After": "60", "X-RateLimit-Remaining": "0"},
+        )
+    response = await call_next(request)
+    response.headers["X-RateLimit-Limit"] = str(limit)
+    response.headers["X-RateLimit-Remaining"] = str(remaining)
+    return response
 
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -203,15 +198,14 @@ if not SESSION_SECRET:
     if os.path.exists(_env_path):
         with open(_env_path, "a", encoding="utf-8") as _f:
             _f.write(f"\nSESSION_SECRET={SESSION_SECRET}\n")
-    print("WARNING: SESSION_SECRET not set, generated a random one (saved to .env)")
+    logger.warning("SESSION_SECRET not set, generated a random one (saved to .env)")
 SESSION_EXPIRE_HOURS = 24
 
 # ── Database ─────────────────────────────────────────────────────────
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///user.db")
-if DATABASE_URL.startswith("sqlite"):
-    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-else:
-    engine = create_engine(DATABASE_URL)
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL 环境变量未设置，请在 .env 中配置数据库连接")
+engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
 
@@ -281,13 +275,6 @@ class UploadedDocument(Base):
     file_type = Column(String(50), nullable=False)
     file_size = Column(Integer, nullable=False)
     uploaded_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-
-
-# 数据库索引（加速查询）
-Index("ix_chat_user_updated", Chat.user_id, Chat.updated_at)
-Index("ix_message_chat", Message.chat_id)
-Index("ix_kb_user", KnowledgeBase.user_id)
-Index("ix_doc_user_kb", UploadedDocument.user_id, UploadedDocument.knowledge_base_id)
 
 
 Base.metadata.create_all(engine)
@@ -424,9 +411,9 @@ def initialize_vector_database():
     rag_model.set_memory_db_factory(SessionLocal, Message)
 
     if not os.path.exists(db_path):
-        print("向量数据库不存在，开始构建...")
+        logger.info("向量数据库不存在，开始构建...")
         if os.path.exists(KNOWLEDGE_BASE_FOLDER) and os.listdir(KNOWLEDGE_BASE_FOLDER):
-            print(f"正在处理 knowledge_base 文件夹: {KNOWLEDGE_BASE_FOLDER}")
+            logger.info(f"正在处理 knowledge_base 文件夹: {KNOWLEDGE_BASE_FOLDER}")
             rag_model.add_folder_documents(KNOWLEDGE_BASE_FOLDER)
 
         db = SessionLocal()
@@ -442,19 +429,19 @@ def initialize_vector_database():
                             documents = rag_model.text_splitter.split_documents(pages)
                             all_texts.extend([d.page_content for d in documents])
                         except Exception as e:
-                            print(f"处理文档 {doc.filename} 失败: {e}")
+                            logger.warning(f"处理文档 {doc.filename} 失败: {e}")
                 if all_texts:
                     rag_model.add_documents(all_texts)
         finally:
             db.close()
 
-        print("向量数据库构建完成")
+        logger.info("向量数据库构建完成")
     else:
-        print("向量数据库已存在，跳过初始化构建")
+        logger.info("向量数据库已存在，跳过初始化构建")
 
     # BM25 索引独立检查：如果 FAISS 存在但 BM25 索引缺失，单独构建 BM25
     if not os.path.exists("bm25_index.pkl"):
-        print("BM25 索引不存在，开始构建...")
+        logger.info("BM25 索引不存在，开始构建...")
         all_texts = []
         # 处理 knowledge_base 文件夹
         if os.path.exists(KNOWLEDGE_BASE_FOLDER) and os.listdir(KNOWLEDGE_BASE_FOLDER):
@@ -466,7 +453,7 @@ def initialize_vector_database():
                         documents = rag_model.general_splitter.split_documents(pages)
                         all_texts.extend([d.page_content for d in documents])
                     except Exception as e:
-                        print(f"处理文档 {filename} 失败: {e}")
+                        logger.warning(f"处理文档 {filename} 失败: {e}")
         # 处理已上传的文档
         db = SessionLocal()
         try:
@@ -478,15 +465,15 @@ def initialize_vector_database():
                         documents = rag_model.general_splitter.split_documents(pages)
                         all_texts.extend([d.page_content for d in documents])
                     except Exception as e:
-                        print(f"处理文档 {doc.filename} 失败: {e}")
+                        logger.warning(f"处理文档 {doc.filename} 失败: {e}")
         finally:
             db.close()
         if all_texts:
             rag_model.bm25_retriever.build_index(all_texts)
             rag_model.bm25_retriever.save_index()
-            print(f"BM25 索引构建完成，文档数量: {len(all_texts)}")
+            logger.info(f"BM25 索引构建完成，文档数量: {len(all_texts)}")
         else:
-            print("无文档可构建 BM25 索引")
+            logger.info("无文档可构建 BM25 索引")
 
 
 initialize_vector_database()
@@ -501,7 +488,7 @@ def ensure_admin_exists():
             admin_password = os.getenv("ADMIN_PASSWORD")
             if not admin_password:
                 admin_password = secrets.token_urlsafe(16)
-                print(f"WARNING: ADMIN_PASSWORD 未设置，已生成随机密码: {admin_password}")
+                logger.warning(f"ADMIN_PASSWORD 未设置，已生成随机密码: {admin_password}")
                 _env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
                 if os.path.exists(_env_path):
                     with open(_env_path, "a", encoding="utf-8") as _f:
@@ -510,9 +497,9 @@ def ensure_admin_exists():
             admin_user.set_password(admin_password)
             db.add(admin_user)
             db.commit()
-            print("已创建默认管理员账号 (密码已写入 .env)")
+            logger.info("已创建默认管理员账号 (密码已写入 .env)")
         else:
-            print(f"管理员账号已存在: {admin.phone}")
+            logger.info(f"管理员账号已存在: {admin.phone}")
     finally:
         db.close()
 
@@ -563,11 +550,17 @@ def register_submit(
     confirm_password: str = Form(...),
     db: Session = Depends(get_db),
 ):
+    import re
+
     errors = []
     if not all([phone, username, password, confirm_password]):
         errors.append("请填写所有必填字段")
-    if len(password) < 6:
-        errors.append("密码长度至少为6位")
+    if not re.match(r"^1[3-9]\d{9}$", phone):
+        errors.append("请输入有效的11位手机号")
+    if len(password) < 8:
+        errors.append("密码长度至少为8位")
+    if not re.search(r"[a-zA-Z]", password) or not re.search(r"\d", password):
+        errors.append("密码必须包含字母和数字")
     if password != confirm_password:
         errors.append("两次输入的密码不一致")
     if db.query(User).filter(User.phone == phone).first():
@@ -685,12 +678,12 @@ def upload_page(request: Request, user: User = Depends(require_user), db: Sessio
 def _process_document_async(file_path: str, doc_id: int, knowledge_base_id: int = None):
     """后台异步处理文档索引"""
     try:
-        print(f"[异步] 开始处理文档索引: {file_path}")
+        logger.info(f"[异步] 开始处理文档索引: {file_path}")
         rag_model.add_file_documents(file_path)
         rag_model.invalidate_kb_cache(knowledge_base_id)
-        print(f"[异步] 文档索引完成: {file_path}")
+        logger.info(f"[异步] 文档索引完成: {file_path}")
     except Exception as e:
-        print(f"[异步] 文档索引失败: {file_path}, 错误: {e}")
+        logger.error(f"[异步] 文档索引失败: {file_path}, 错误: {e}")
 
 
 @app.post("/upload")
@@ -754,9 +747,9 @@ def delete_document(doc_id: int, user: User = Depends(require_user), db: Session
                     rag_model.bm25_retriever.remove_documents(texts_to_remove)
                     rag_model.bm25_retriever.save_index()
                     rag_model.invalidate_kb_cache(doc.knowledge_base_id)
-                    print(f"已从BM25索引中移除文档 {doc.filename} 的 {len(texts_to_remove)} 个文本块")
+                    logger.info(f"已从BM25索引中移除文档 {doc.filename} 的 {len(texts_to_remove)} 个文本块")
         except Exception as e:
-            print(f"从索引中移除文档失败: {e}")
+            logger.warning(f"从索引中移除文档失败: {e}")
 
         if os.path.exists(doc.file_path):
             with suppress(Exception):
@@ -920,10 +913,8 @@ async def ask_stream(request: Request, user: User = Depends(require_user), db: S
 
     safe, reason = check_injection(user_input)
     if not safe:
-        import json as _inj_json
-
         def _reject():
-            yield f"data: {_inj_json.dumps({'error': reason}, ensure_ascii=False)}\n\n"
+            yield f"data: {_json.dumps({'error': reason}, ensure_ascii=False)}\n\n"
             yield 'data: {"done": true}\n\n'
 
         return StreamingResponse(
@@ -994,9 +985,9 @@ async def startup_event():
     from law_assistant.redis_utils import is_available
 
     if is_available():
-        print("Redis 连接成功")
+        logger.info("Redis 连接成功")
     else:
-        print("WARNING: Redis 不可用，使用本地缓存和数据库回退")
+        logger.warning("Redis 不可用，使用本地缓存和数据库回退")
 
 
 @app.on_event("shutdown")

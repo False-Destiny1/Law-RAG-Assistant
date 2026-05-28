@@ -47,7 +47,7 @@ Requires a `.env` file with at minimum:
 
 Total LLM calls per request: 2 (1 for query analysis, 1 for answer generation)
 
-**Web layer** (`app.py`): FastAPI with Jinja2 templates, cookie-based session auth (bcrypt passwords, SQLite via SQLAlchemy). SSE streaming at `/ask_stream` supports both GET and POST.
+**Web layer** (`app.py`): FastAPI with Jinja2 templates, cookie-based session auth (bcrypt passwords, PostgreSQL via SQLAlchemy). SSE streaming at `/ask_stream` supports both GET and POST.
 
 **Document processing** pipeline:
 - `DocumentProcessor` (`law_assistant/processor.py`) auto-detects legal vs general documents by filename keywords and content patterns
@@ -60,7 +60,7 @@ Total LLM calls per request: 2 (1 for query analysis, 1 for answer generation)
 - `app.py` creates `DeepSeekApiRag` instance on startup, which owns `BM25Retriever`, `DocumentProcessor`, `ConversationMemory`, `LegalKnowledgeGraph`
 - All source modules are in `law_assistant/` package: `rag.py`, `bm25.py`, `memory.py`, `processor.py`, `splitter.py`, `redis_utils.py`, `graph.py`
 - `ConversationMemory` (`law_assistant/memory.py`) is in-memory only (dict), keyed by `chat_{id}` — not persisted to DB
-- Chat messages (user + bot) are persisted to SQLite `message` table
+- Chat messages (user + bot) are persisted to PostgreSQL `message` table
 - Knowledge base per-chat selection: experts/admins can bind a knowledge base to a chat; creates a temporary `DeepSeekApiRag` with that KB's documents
 
 ## Key Design Decisions

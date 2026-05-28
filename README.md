@@ -17,7 +17,7 @@
 - 内存 ≥ 8GB
 - 显存 ≥ 8GB（本地嵌入模型需要 CUDA）
 - 存储 ≥ 10GB
-- PostgreSQL 16+（或使用 SQLite）
+- PostgreSQL 16+
 - Redis（可选，用于缓存和限流，不安装时自动降级）
 - Neo4j（可选，用于知识图谱检索，不安装时自动降级为双路检索）
 
@@ -96,10 +96,7 @@ NEO4J_PASSWORD=你的Neo4j密码
 NEO4J_DATABASE=neo4j
 
 # ── 数据库 ──
-# PostgreSQL（推荐）
 DATABASE_URL=postgresql://postgres:密码@localhost:5432/law_assistant
-# 或 SQLite（开发用）
-# DATABASE_URL=sqlite:///user.db
 
 # ── Redis（可选）──
 REDIS_URL=redis://localhost:6379/0
@@ -114,8 +111,6 @@ psql -U postgres
 CREATE DATABASE law_assistant;
 \q
 ```
-
-**SQLite：** 无需额外操作，首次启动自动创建。
 
 ### 第五步：准备知识库
 

@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 from typing import Any
@@ -5,6 +6,8 @@ from typing import Any
 from langchain_community.document_loaders import Docx2txtLoader, PyPDFLoader, TextLoader
 
 from law_assistant.splitter import DocumentSplitter, GeneralDocumentSplitter
+
+logger = logging.getLogger(__name__)
 
 
 class DocumentProcessor:
@@ -68,11 +71,11 @@ class DocumentProcessor:
                 loader = PyPDFLoader(file_path)
                 documents = loader.load()
                 if self._needs_ocr(documents):
-                    print(f"[OCR] 文件内容检测文本不足，启用OCR: {file_path}")
+                    logger.info(f"[OCR] 文件内容检测文本不足，启用OCR: {file_path}")
                     images = self._pdf_to_images(file_path)
                     documents = self._ocr_images_to_documents(images, file_path)
             except Exception:
-                print(f"[OCR] PDF加载失败，启用OCR: {file_path}")
+                logger.info(f"[OCR] PDF加载失败，启用OCR: {file_path}")
                 images = self._pdf_to_images(file_path)
                 documents = self._ocr_images_to_documents(images, file_path)
         elif file_path.lower().endswith((".doc", ".docx")):
@@ -91,14 +94,14 @@ class DocumentProcessor:
             try:
                 from paddleocr import PaddleOCR
 
-                print("[OCR] 正在初始化 PaddleOCR 引擎（首次加载较慢）...")
+                logger.info("[OCR] 正在初始化 PaddleOCR 引擎（首次加载较慢）...")
                 self._ocr_engine = PaddleOCR(
                     use_doc_orientation_classify=False,
                     use_doc_unwarping=False,
                     use_textline_orientation=False,
                     lang="ch",
                 )
-                print("[OCR] PaddleOCR 引擎初始化完成")
+                logger.info("[OCR] PaddleOCR 引擎初始化完成")
             except ImportError:
                 raise ImportError(
                     "需要安装 PaddleOCR 才能处理扫描文档。请运行: pip install paddleocr paddlepaddle"
@@ -149,12 +152,12 @@ class DocumentProcessor:
             if page_text.strip():
                 documents.append(Document(page_content=page_text, metadata={"source": file_path, "page": i}))
             else:
-                print(f"[OCR] 警告: 第 {i + 1} 页 OCR 未识别到文本")
+                logger.warning(f"[OCR] 第 {i + 1} 页 OCR 未识别到文本")
             # Release image memory after processing
             del img, img_array
         del images
         gc.collect()
-        print(f"[OCR] 扫描完成，提取 {len(documents)} 页有效文本")
+        logger.info(f"[OCR] 扫描完成，提取 {len(documents)} 页有效文本")
         return documents
 
     def _load_image_with_ocr(self, file_path: str) -> list:
@@ -172,7 +175,7 @@ class DocumentProcessor:
             if hasattr(result, "rec_texts"):
                 lines.extend(result.rec_texts)
         text = "\n".join(lines)
-        print(f"[OCR] 图片 OCR 完成: {file_path}, 提取 {len(text)} 字符")
+        logger.info(f"[OCR] 图片 OCR 完成: {file_path}, 提取 {len(text)} 字符")
         return [Document(page_content=text, metadata={"source": file_path, "page": 0})]
 
     def process_document(self, file_path: str) -> list[dict[str, Any]]:
@@ -187,11 +190,6 @@ class DocumentProcessor:
         else:
             return self._process_general_from_docs(documents)
 
-    def process_legal_document(self, file_path: str) -> list[dict[str, Any]]:
-        """处理法律文档，返回结构化的条款（独立使用）"""
-        documents = self._load_documents(file_path)
-        return self._process_legal_from_docs(documents)
-
     def _process_legal_from_docs(self, documents: list) -> list[dict[str, Any]]:
         """从已加载的文档列表中提取结构化法律条款"""
         structured_articles = []
@@ -200,11 +198,6 @@ class DocumentProcessor:
             articles = self._extract_structured_articles(content)
             structured_articles.extend(articles)
         return structured_articles
-
-    def process_general_document(self, file_path: str) -> list[dict[str, Any]]:
-        """处理普通文档（独立使用）"""
-        documents = self._load_documents(file_path)
-        return self._process_general_from_docs(documents)
 
     def _process_general_from_docs(self, documents: list) -> list[dict[str, Any]]:
         """从已加载的文档列表中生成通用分块"""
@@ -240,7 +233,7 @@ class DocumentProcessor:
                 pass  # PyPDFLoader 失败，走 OCR 路径
 
             # 慢速路径：扫描 PDF 检测或提取失败
-            print(f"[OCR] PDF文本层不足，启用OCR: {file_path}")
+            logger.info(f"[OCR] PDF文本层不足，启用OCR: {file_path}")
             images = self._pdf_to_images(file_path)
             return self._ocr_images_to_documents(images, file_path)
         elif file_path.lower().endswith((".doc", ".docx")):
