@@ -101,7 +101,7 @@ def _cn_to_int(cn: str) -> int:
     if cn.isdigit():
         return int(cn)
 
-    table = {"零": 0, "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+    table = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
     units = {"十": 10, "百": 100, "千": 1000, "万": 10000}
 
     result = 0
@@ -145,23 +145,34 @@ class LegalKnowledgeGraph:
 
     # ─── 连接管理 ───────────────────────────────────────────
 
-    def connect(self) -> bool:
-        """建立 Neo4j 连接，返回是否成功"""
-        try:
-            from neo4j import GraphDatabase
+    def connect(self, max_retries: int = 3, retry_delay: float = 2.0) -> bool:
+        """建立 Neo4j 连接（带重试），返回是否成功"""
+        import time
 
-            self._driver = GraphDatabase.driver(self._uri, auth=(self._user, self._password))
-            # 验证连接
-            self._driver.verify_connectivity()
-            self._available = True
-            logger.info(f"Neo4j 连接成功: {self._uri}")
-            return True
-        except ImportError:
-            logger.warning("neo4j 驱动未安装，图谱功能不可用。pip install neo4j>=5.0.0")
-            return False
-        except Exception as e:
-            logger.warning(f"Neo4j 连接失败: {e}，图谱功能降级")
-            return False
+        for attempt in range(1, max_retries + 1):
+            try:
+                from neo4j import GraphDatabase
+
+                self._driver = GraphDatabase.driver(
+                    self._uri, auth=(self._user, self._password), connection_timeout=10
+                )
+                self._driver.verify_connectivity()
+                self._available = True
+                logger.info(f"Neo4j 连接成功: {self._uri}")
+                return True
+            except ImportError:
+                logger.warning("neo4j 驱动未安装，图谱功能不可用。pip install neo4j>=5.0.0")
+                return False
+            except Exception as e:
+                if self._driver:
+                    self._driver.close()
+                    self._driver = None
+                if attempt < max_retries:
+                    logger.info(f"Neo4j 连接失败 (尝试 {attempt}/{max_retries}): {e}，{retry_delay}s 后重试...")
+                    time.sleep(retry_delay)
+                else:
+                    logger.warning(f"Neo4j 连接失败 (已重试 {max_retries} 次): {e}，图谱功能降级")
+        return False
 
     def close(self):
         """关闭连接"""

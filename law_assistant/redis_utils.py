@@ -203,6 +203,32 @@ def rate_limit_check(identifier: str, limit: int, window: int = 60):
         return (count <= limit, count, remaining)
 
 
+# --- Session token blacklist ---
+
+
+def blacklist_token(token: str, ttl_seconds: int = 86400) -> None:
+    """Add a session token to the blacklist (TTL matches session expiry)."""
+    client = _get_client()
+    if client is None:
+        return
+    try:
+        client.setex(_key(f"blacklist:{token}"), ttl_seconds, "1")
+    except Exception as e:
+        logger.warning(f"Failed to blacklist token: {e}")
+
+
+def is_token_blacklisted(token: str) -> bool:
+    """Check if a session token has been blacklisted."""
+    client = _get_client()
+    if client is None:
+        return False
+    try:
+        return client.exists(_key(f"blacklist:{token}")) > 0
+    except Exception as e:
+        logger.warning(f"Failed to check token blacklist: {e}")
+        return False
+
+
 # --- Health check ---
 
 

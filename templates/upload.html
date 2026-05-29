@@ -125,12 +125,9 @@
                             {% endif %}
                         </div>
                     </div>
-                    <form method="POST" action="/upload/{{ doc.id }}/delete" onsubmit="return confirm('确定删除此文档？');">
-                        <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
-                        <button type="submit" class="btn btn-ghost btn-sm" style="color:var(--c-error);" title="删除">
-                            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
-                        </button>
-                    </form>
+                    <button onclick="deleteDocument({{ doc.id }})" class="btn btn-ghost btn-sm" style="color:var(--c-error);" title="删除">
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+                    </button>
                 </div>
                 {% endfor %}
             </div>
@@ -185,5 +182,21 @@ document.addEventListener('DOMContentLoaded', function() {
         document.getElementById('submitBtn').textContent = '上传中...';
     });
 });
+
+function getCsrfToken() {
+    const match = document.cookie.match(/csrf_token=([^;]+)/);
+    return match ? match[1] : '';
+}
+
+function deleteDocument(docId) {
+    if (!confirm('确定删除此文档？')) return;
+    fetch('/upload/' + docId, {
+        method: 'DELETE',
+        headers: { 'X-CSRF-Token': getCsrfToken() }
+    }).then(r => {
+        if (r.ok) { window.location.reload(); }
+        else { r.json().then(d => alert(d.error || '删除失败')); }
+    }).catch(() => alert('删除失败'));
+}
 </script>
 {% endblock %}

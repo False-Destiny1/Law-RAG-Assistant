@@ -72,12 +72,10 @@ class DocumentProcessor:
                 documents = loader.load()
                 if self._needs_ocr(documents):
                     logger.info(f"[OCR] 文件内容检测文本不足，启用OCR: {file_path}")
-                    images = self._pdf_to_images(file_path)
-                    documents = self._ocr_images_to_documents(images, file_path)
+                    documents = self._ocr_pdf_to_documents(file_path)
             except Exception:
                 logger.info(f"[OCR] PDF加载失败，启用OCR: {file_path}")
-                images = self._pdf_to_images(file_path)
-                documents = self._ocr_images_to_documents(images, file_path)
+                documents = self._ocr_pdf_to_documents(file_path)
         elif file_path.lower().endswith((".doc", ".docx")):
             loader = Docx2txtLoader(file_path)
             documents = loader.load()
@@ -117,20 +115,65 @@ class DocumentProcessor:
         return avg_chars < 50
 
     def _pdf_to_images(self, file_path: str) -> list:
-        """将 PDF 页面转换为 PIL Image 列表"""
+        """将 PDF 页面转换为 PIL Image 列表（兼容旧调用）"""
         try:
             from pdf2image import convert_from_path
         except ImportError:
             raise ImportError("需要安装 pdf2image 才能处理扫描PDF。请运行: pip install pdf2image") from None
         try:
-            # 注意: convert_from_path 会一次性加载所有页面到内存
-            # 对于大型 PDF (>100页) 可能消耗大量内存
             images = convert_from_path(file_path, dpi=200, fmt="png")
             return images
         except Exception as e:
             raise RuntimeError(
                 f"PDF转图片失败，请确保已安装 poppler。Windows: conda install -c conda-forge poppler。错误: {e}"
             ) from e
+
+    def _ocr_pdf_to_documents(self, file_path: str) -> list:
+        """逐页将 PDF 转图片并 OCR，返回 Document 列表（逐页释放内存，避免 OOM）"""
+        import gc
+
+        import numpy as np
+        from langchain_core.documents import Document
+        from pdf2image import convert_from_path, pdfinfo_from_path
+
+        ocr = self._get_ocr_engine()
+        try:
+            info = pdfinfo_from_path(file_path)
+            total_pages = info.get("Pages", 0)
+        except Exception:
+            total_pages = 0
+
+        if total_pages == 0:
+            logger.warning(f"无法获取 PDF 页数，回退到全量加载: {file_path}")
+            images = self._pdf_to_images(file_path)
+            return self._ocr_images_to_documents(images, file_path)
+
+        documents = []
+        for page_num in range(1, total_pages + 1):
+            try:
+                images = convert_from_path(file_path, dpi=200, fmt="png", first_page=page_num, last_page=page_num)
+                if not images:
+                    continue
+                img = images[0]
+                img_array = np.array(img)
+                results = ocr.predict(img_array)
+                page_lines = []
+                for result in results:
+                    if hasattr(result, "rec_texts"):
+                        page_lines.extend(result.rec_texts)
+                page_text = "\n".join(page_lines)
+                if page_text.strip():
+                    documents.append(Document(page_content=page_text, metadata={"source": file_path, "page": page_num - 1}))
+                else:
+                    logger.warning(f"[OCR] 第 {page_num} 页 OCR 未识别到文本")
+                del img, img_array, images
+            except Exception as e:
+                logger.warning(f"[OCR] 第 {page_num} 页处理失败: {e}")
+            if page_num % 10 == 0:
+                gc.collect()
+        gc.collect()
+        logger.info(f"[OCR] 扫描完成，提取 {len(documents)}/{total_pages} 页有效文本")
+        return documents
 
     def _ocr_images_to_documents(self, images: list, file_path: str) -> list:
         """对图片列表执行 OCR，返回 LangChain Document 列表。处理后释放图片内存。"""
@@ -153,7 +196,6 @@ class DocumentProcessor:
                 documents.append(Document(page_content=page_text, metadata={"source": file_path, "page": i}))
             else:
                 logger.warning(f"[OCR] 第 {i + 1} 页 OCR 未识别到文本")
-            # Release image memory after processing
             del img, img_array
         del images
         gc.collect()
@@ -234,8 +276,7 @@ class DocumentProcessor:
 
             # 慢速路径：扫描 PDF 检测或提取失败
             logger.info(f"[OCR] PDF文本层不足，启用OCR: {file_path}")
-            images = self._pdf_to_images(file_path)
-            return self._ocr_images_to_documents(images, file_path)
+            return self._ocr_pdf_to_documents(file_path)
         elif file_path.lower().endswith((".doc", ".docx")):
             loader = Docx2txtLoader(file_path)
             return loader.load()

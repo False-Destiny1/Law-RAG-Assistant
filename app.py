@@ -3,9 +3,11 @@ import hmac
 import json as _json
 import logging
 import os
+import re
 import secrets
+import urllib.parse
 import uuid
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 
 import bcrypt
@@ -43,7 +45,21 @@ def _safe_int(value, default=None):
 
 
 # ── App ──────────────────────────────────────────────────────────────
-app = FastAPI(title="智能法律助手")
+
+
+@asynccontextmanager
+async def lifespan(app_instance):
+    from law_assistant.redis_utils import close_pool, is_available
+
+    if is_available():
+        logger.info("Redis 连接成功")
+    else:
+        logger.warning("Redis 不可用，使用本地缓存和数据库回退")
+    yield
+    close_pool()
+
+
+app = FastAPI(title="智能法律助手", lifespan=lifespan)
 
 
 @app.middleware("http")
@@ -95,19 +111,22 @@ async def csrf_middleware(request: Request, call_next):
         # Read token from header first (works for JSON, DELETE, and multipart via JS)
         form_token = request.headers.get("X-CSRF-Token", "")
 
-        # Fallback: parse csrf_token from URL-encoded form body (not multipart — too expensive)
+        # Fallback: parse csrf_token from form body
         if not form_token:
             content_type = request.headers.get("content-type", "")
-            if "application/x-www-form-urlencoded" in content_type:
-                try:
+            try:
+                if "application/x-www-form-urlencoded" in content_type:
                     body = await request.body()
-                    import urllib.parse
-
                     parsed = urllib.parse.parse_qs(body.decode("utf-8", errors="ignore"))
                     tokens = parsed.get("csrf_token", [])
                     form_token = tokens[0] if tokens else ""
-                except Exception:
-                    pass
+                elif "multipart/form-data" in content_type:
+                    # Don't parse body (consumes it, breaking File() uploads).
+                    # samesite=lax cookie already prevents cross-site; just use cookie token.
+                    if cookie_token:
+                        form_token = cookie_token
+            except Exception as e:
+                logger.debug(f"CSRF token 解析失败: {e}")
 
         if not form_token or not hmac.compare_digest(cookie_token, form_token):
             # For form submissions, redirect back instead of returning JSON
@@ -140,8 +159,8 @@ def _get_rate_limit_id(request: Request) -> str:
                 ).hexdigest()[:32]
                 if hmac.compare_digest(sig, expected):
                     return f"user:{user_id_str}"
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Session token 解析失败: {e}")
     # Only trust X-Forwarded-For if TRUSTED_PROXY is configured
     if os.getenv("TRUSTED_PROXY"):
         forwarded = request.headers.get("X-Forwarded-For")
@@ -312,6 +331,14 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User | 
     token = request.cookies.get("session_token")
     if not token:
         return None
+    # Check token blacklist (logout invalidation)
+    try:
+        from law_assistant.redis_utils import is_token_blacklisted
+
+        if is_token_blacklisted(token):
+            return None
+    except Exception:
+        pass
     try:
         parts = token.split(":")
         if len(parts) != 4:
@@ -352,8 +379,8 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User | 
                     role=cached["role"],
                 )
                 return user
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Redis 用户缓存读取失败: {e}")
 
         # Fallback: DB query
         user = db.get(User, user_id)
@@ -371,8 +398,8 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User | 
                     },
                     ttl=300,
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Redis 用户缓存写入失败: {e}")
         return user
     except (ValueError, AttributeError):
         return None
@@ -410,41 +437,14 @@ def initialize_vector_database():
     rag_model.set_knowledge_base_model(KnowledgeBase)
     rag_model.set_memory_db_factory(SessionLocal, Message)
 
-    if not os.path.exists(db_path):
-        logger.info("向量数据库不存在，开始构建...")
+    need_faiss = not os.path.exists(db_path)
+    need_bm25 = not os.path.exists("bm25_index.pkl")
+
+    if need_faiss or need_bm25:
+        # 收集所有文档文本（只处理一次）
+        all_texts = []
         if os.path.exists(KNOWLEDGE_BASE_FOLDER) and os.listdir(KNOWLEDGE_BASE_FOLDER):
             logger.info(f"正在处理 knowledge_base 文件夹: {KNOWLEDGE_BASE_FOLDER}")
-            rag_model.add_folder_documents(KNOWLEDGE_BASE_FOLDER)
-
-        db = SessionLocal()
-        try:
-            all_docs = db.query(UploadedDocument).all()
-            if all_docs:
-                all_texts = []
-                for doc in all_docs:
-                    if os.path.exists(doc.file_path):
-                        try:
-                            # 统一通过 DocumentProcessor 加载（支持 OCR 回退）
-                            pages = rag_model.document_processor._load_documents(doc.file_path)
-                            documents = rag_model.text_splitter.split_documents(pages)
-                            all_texts.extend([d.page_content for d in documents])
-                        except Exception as e:
-                            logger.warning(f"处理文档 {doc.filename} 失败: {e}")
-                if all_texts:
-                    rag_model.add_documents(all_texts)
-        finally:
-            db.close()
-
-        logger.info("向量数据库构建完成")
-    else:
-        logger.info("向量数据库已存在，跳过初始化构建")
-
-    # BM25 索引独立检查：如果 FAISS 存在但 BM25 索引缺失，单独构建 BM25
-    if not os.path.exists("bm25_index.pkl"):
-        logger.info("BM25 索引不存在，开始构建...")
-        all_texts = []
-        # 处理 knowledge_base 文件夹
-        if os.path.exists(KNOWLEDGE_BASE_FOLDER) and os.listdir(KNOWLEDGE_BASE_FOLDER):
             for filename in os.listdir(KNOWLEDGE_BASE_FOLDER):
                 file_path = os.path.join(KNOWLEDGE_BASE_FOLDER, filename)
                 if os.path.isfile(file_path):
@@ -454,11 +454,10 @@ def initialize_vector_database():
                         all_texts.extend([d.page_content for d in documents])
                     except Exception as e:
                         logger.warning(f"处理文档 {filename} 失败: {e}")
-        # 处理已上传的文档
+
         db = SessionLocal()
         try:
-            all_docs = db.query(UploadedDocument).all()
-            for doc in all_docs:
+            for doc in db.query(UploadedDocument).all():
                 if os.path.exists(doc.file_path):
                     try:
                         pages = rag_model.document_processor._load_documents(doc.file_path)
@@ -468,12 +467,21 @@ def initialize_vector_database():
                         logger.warning(f"处理文档 {doc.filename} 失败: {e}")
         finally:
             db.close()
+
         if all_texts:
-            rag_model.bm25_retriever.build_index(all_texts)
-            rag_model.bm25_retriever.save_index()
-            logger.info(f"BM25 索引构建完成，文档数量: {len(all_texts)}")
+            if need_faiss:
+                logger.info("向量数据库不存在，开始构建...")
+                rag_model.add_documents(all_texts, save_to_disk=True)
+                logger.info("向量数据库构建完成")
+            if need_bm25:
+                logger.info("BM25 索引不存在，开始构建...")
+                rag_model.bm25_retriever.build_index(all_texts)
+                rag_model.bm25_retriever.save_index()
+                logger.info(f"BM25 索引构建完成，文档数量: {len(all_texts)}")
         else:
-            logger.info("无文档可构建 BM25 索引")
+            logger.info("无文档可构建索引")
+    else:
+        logger.info("向量数据库和 BM25 索引均已存在，跳过初始化构建")
 
 
 initialize_vector_database()
@@ -550,8 +558,6 @@ def register_submit(
     confirm_password: str = Form(...),
     db: Session = Depends(get_db),
 ):
-    import re
-
     errors = []
     if not all([phone, username, password, confirm_password]):
         errors.append("请填写所有必填字段")
@@ -580,7 +586,15 @@ def register_submit(
 
 
 @app.post("/logout")
-def logout():
+def logout(request: Request):
+    token = request.cookies.get("session_token", "")
+    if token:
+        try:
+            from law_assistant.redis_utils import blacklist_token
+
+            blacklist_token(token, ttl_seconds=SESSION_EXPIRE_HOURS * 3600)
+        except Exception as e:
+            logger.warning(f"Token 黑名单写入失败: {e}")
     response = RedirectResponse(url="/login", status_code=303)
     response.delete_cookie("session_token")
     response.delete_cookie("csrf_token")
@@ -646,17 +660,36 @@ def edit_kb_submit(
     return RedirectResponse(url="/knowledge-bases", status_code=303)
 
 
-@app.post("/knowledge-base/{kb_id}/delete")
-def delete_kb(kb_id: int, user: User = Depends(require_user), db: Session = Depends(get_db)):
+@app.delete("/knowledge-base/{kb_id}")
+def delete_kb(
+    kb_id: int,
+    background_tasks: BackgroundTasks,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_db),
+):
     kb = db.query(KnowledgeBase).filter(KnowledgeBase.id == kb_id, KnowledgeBase.user_id == user.id).first()
-    if kb:
-        for doc in kb.documents:
-            if os.path.exists(doc.file_path):
-                with suppress(Exception):
-                    os.remove(doc.file_path)
-        db.delete(kb)
-        db.commit()
-    return RedirectResponse(url="/knowledge-bases", status_code=303)
+    if not kb:
+        return JSONResponse({"error": "知识库不存在"}, status_code=404)
+    # 删除前提取所有文档的文本（文件删除后就无法再读取）
+    all_texts = []
+    for doc in kb.documents:
+        if os.path.exists(doc.file_path):
+            try:
+                from law_assistant.processor import DocumentProcessor
+
+                chunks = DocumentProcessor().process_document(doc.file_path)
+                all_texts.extend([c["full_text"] for c in chunks])
+            except Exception as e:
+                logger.warning(f"提取文档 {doc.filename} 文本失败: {e}")
+            with suppress(Exception):
+                os.remove(doc.file_path)
+    # 后台清理 BM25 索引
+    if all_texts:
+        background_tasks.add_task(_remove_document_from_texts, all_texts, kb_id, f"知识库#{kb_id}")
+    rag_model.invalidate_kb_cache(kb_id)
+    db.delete(kb)
+    db.commit()
+    return JSONResponse({"success": True})
 
 
 @app.get("/upload", response_class=HTMLResponse)
@@ -731,32 +764,48 @@ async def upload_submit(
     return RedirectResponse(url="/upload", status_code=303)
 
 
-@app.post("/upload/{doc_id}/delete")
-def delete_document(doc_id: int, user: User = Depends(require_user), db: Session = Depends(get_db)):
+@app.delete("/upload/{doc_id}")
+def delete_document(
+    doc_id: int,
+    background_tasks: BackgroundTasks,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_db),
+):
     doc = db.query(UploadedDocument).filter(UploadedDocument.id == doc_id, UploadedDocument.user_id == user.id).first()
-    if doc:
-        # P1: 删除前先从索引中移除该文档的内容
+    if not doc:
+        return JSONResponse({"error": "文档不存在"}, status_code=404)
+    # 删除前提取文本（文件删除后就无法再读取）
+    file_path = doc.file_path
+    kb_id = doc.knowledge_base_id
+    filename = doc.filename
+    texts_to_remove = []
+    if os.path.exists(file_path):
         try:
-            if os.path.exists(doc.file_path):
-                from law_assistant.processor import DocumentProcessor
+            from law_assistant.processor import DocumentProcessor
 
-                processor = DocumentProcessor()
-                chunks = processor.process_document(doc.file_path)
-                texts_to_remove = [c["full_text"] for c in chunks]
-                if texts_to_remove:
-                    rag_model.bm25_retriever.remove_documents(texts_to_remove)
-                    rag_model.bm25_retriever.save_index()
-                    rag_model.invalidate_kb_cache(doc.knowledge_base_id)
-                    logger.info(f"已从BM25索引中移除文档 {doc.filename} 的 {len(texts_to_remove)} 个文本块")
+            chunks = DocumentProcessor().process_document(file_path)
+            texts_to_remove = [c["full_text"] for c in chunks]
         except Exception as e:
-            logger.warning(f"从索引中移除文档失败: {e}")
+            logger.warning(f"提取文档文本失败: {e}")
+        with suppress(Exception):
+            os.remove(file_path)
+    # 后台清理 BM25 索引
+    if texts_to_remove:
+        background_tasks.add_task(_remove_document_from_texts, texts_to_remove, kb_id, filename)
+    db.delete(doc)
+    db.commit()
+    return JSONResponse({"success": True})
 
-        if os.path.exists(doc.file_path):
-            with suppress(Exception):
-                os.remove(doc.file_path)
-        db.delete(doc)
-        db.commit()
-    return RedirectResponse(url="/upload", status_code=303)
+
+def _remove_document_from_texts(texts: list[str], kb_id: int, filename: str):
+    """后台任务：从 BM25 索引中移除已删除文档的文本块"""
+    try:
+        rag_model.bm25_retriever.remove_documents(texts)
+        rag_model.bm25_retriever.save_index()
+        rag_model.invalidate_kb_cache(kb_id)
+        logger.info(f"已从BM25索引中移除文档 {filename} 的 {len(texts)} 个文本块")
+    except Exception as e:
+        logger.warning(f"从索引中移除文档失败: {e}")
 
 
 # ── API routes ───────────────────────────────────────────────────────
@@ -980,21 +1029,21 @@ async def ask_stream(request: Request, user: User = Depends(require_user), db: S
     )
 
 
-@app.on_event("startup")
-async def startup_event():
+@app.get("/health")
+def health_check():
     from law_assistant.redis_utils import is_available
 
-    if is_available():
-        logger.info("Redis 连接成功")
-    else:
-        logger.warning("Redis 不可用，使用本地缓存和数据库回退")
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    from law_assistant.redis_utils import close_pool
-
-    close_pool()
+    redis_ok = is_available()
+    db_ok = False
+    try:
+        db = SessionLocal()
+        db.execute(_text("SELECT 1"))
+        db_ok = True
+        db.close()
+    except Exception:
+        pass
+    status = "healthy" if (db_ok and rag_model is not None) else "degraded"
+    return {"status": status, "database": db_ok, "redis": redis_ok, "rag_ready": rag_model is not None}
 
 
 if __name__ == "__main__":

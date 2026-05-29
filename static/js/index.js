@@ -47,7 +47,10 @@ document.addEventListener('DOMContentLoaded', function() {
     // ── Knowledge bases ──
     function fetchKnowledgeBases() {
         fetch('/api/knowledge-bases')
-            .then(r => r.json())
+            .then(r => {
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                return r.json();
+            })
             .then(data => {
                 knowledgeBases = data;
                 renderKBSelector();

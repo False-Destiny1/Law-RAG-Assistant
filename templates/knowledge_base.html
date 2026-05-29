@@ -76,10 +76,7 @@
                 </div>
                 <div class="kb-card-actions">
                     <a href="/knowledge-base/{{ kb.id }}/edit" class="btn btn-outline btn-sm">编辑</a>
-                    <form method="POST" action="/knowledge-base/{{ kb.id }}/delete" onsubmit="return confirm('确定删除此知识库？关联文档也将被删除。');" style="display:inline">
-                        <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
-                        <button type="submit" class="btn btn-danger btn-sm">删除</button>
-                    </form>
+                    <button onclick="deleteKB({{ kb.id }})" class="btn btn-danger btn-sm">删除</button>
                 </div>
             </div>
             {% endfor %}
@@ -94,4 +91,21 @@
         {% endif %}
     </main>
 </div>
+<script>
+function getCsrfToken() {
+    const match = document.cookie.match(/csrf_token=([^;]+)/);
+    return match ? match[1] : '';
+}
+
+function deleteKB(kbId) {
+    if (!confirm('确定删除此知识库？关联文档也将被删除。')) return;
+    fetch('/knowledge-base/' + kbId, {
+        method: 'DELETE',
+        headers: { 'X-CSRF-Token': getCsrfToken() }
+    }).then(r => {
+        if (r.ok) { window.location.reload(); }
+        else { r.json().then(d => alert(d.error || '删除失败')); }
+    }).catch(() => alert('删除失败'));
+}
+</script>
 {% endblock %}

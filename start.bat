@@ -52,6 +52,7 @@ echo.
 
 :: Auto-start Neo4j
 echo Checking Neo4j...
+set "NEO4J_NEED_WAIT="
 netstat -an | findstr "7687" | findstr "LISTENING" >nul 2>&1
 if %errorlevel%==0 (
     echo Neo4j is already running on port 7687
@@ -62,14 +63,25 @@ if %errorlevel%==0 (
     ) else (
         echo Starting Neo4j...
         start "Neo4j" cmd /c ""%NEO4J_HOME%\bin\neo4j.bat" console"
-        echo Waiting for Neo4j to start...
-        timeout /t 15 >nul
-        netstat -an | findstr "7687" | findstr "LISTENING" >nul 2>&1
-        if %errorlevel%==0 (
-            echo Neo4j started successfully
-        ) else (
-            echo [WARN] Neo4j failed to start, falling back to vector+BM25
-        )
+        set "NEO4J_NEED_WAIT=1"
+    )
+)
+if defined NEO4J_NEED_WAIT (
+    echo Waiting for Neo4j to start...
+    set NEO4J_WAIT=0
+)
+:wait_neo4j
+if defined NEO4J_NEED_WAIT (
+    timeout /t 5 >nul
+    set /a NEO4J_WAIT+=5
+    netstat -an | findstr "7687" | findstr "LISTENING" >nul 2>&1
+    if %errorlevel%==0 (
+        echo Neo4j started successfully
+        set "NEO4J_NEED_WAIT="
+    ) else (
+        if %NEO4J_WAIT% LSS 60 goto wait_neo4j
+        echo [WARN] Neo4j failed to start within 60 seconds
+        set "NEO4J_NEED_WAIT="
     )
 )
 echo.

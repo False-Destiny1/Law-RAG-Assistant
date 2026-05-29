@@ -683,9 +683,12 @@ class DeepSeekApiRag:
                         logger.warning(f"知识库文档处理失败 {path}: {e}")
             # LRU 淘汰：缓存满时移除最早写入的条目
             if len(self._kb_texts_cache) >= self._KB_CACHE_MAX_SIZE:
-                evict_key = next(iter(self._kb_texts_cache))
-                del self._kb_texts_cache[evict_key]
-                logger.debug(f"缓存淘汰知识库 {evict_key}")
+                try:
+                    evict_key = next(iter(self._kb_texts_cache))
+                    del self._kb_texts_cache[evict_key]
+                    logger.debug(f"缓存淘汰知识库 {evict_key}")
+                except (StopIteration, RuntimeError):
+                    pass
             self._kb_texts_cache[knowledge_base_id] = texts
             # Write-through to Redis
             try:
@@ -741,9 +744,14 @@ class DeepSeekApiRag:
         # Defense-in-depth: 再次检查注入（防止其他入口绕过 app.py 层）
         safe, reason = check_injection(query)
         if not safe:
+            class _RejectChunk:
+                __slots__ = ("content",)
+                def __init__(self, c):
+                    self.content = c
+
             def _reject():
-                yield f"data: {json.dumps({'error': reason}, ensure_ascii=False)}\n\n"
-                yield 'data: {"done": true}\n\n'
+                yield _RejectChunk(json.dumps({"error": reason}, ensure_ascii=False))
+                yield _RejectChunk('{"done": true}')
 
             return {"stream": _reject(), "context": "", "retrieved_documents": [], "conversation_id": conversation_id}
 
@@ -791,6 +799,8 @@ class DeepSeekApiRag:
             "stream": response_stream,
             "context": context,
             "retrieved_documents": [doc[0] for doc in retrieved_docs],
+            "retrieved_documents_with_scores": [(doc, score) for doc, score in retrieved_docs],
+            "analysis": analysis,
             "conversation_id": conversation_id,
         }
 
