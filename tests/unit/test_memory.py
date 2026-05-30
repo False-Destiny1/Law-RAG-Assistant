@@ -1,6 +1,6 @@
 """Unit tests for law_assistant.memory module."""
 
-from law_assistant.memory import SUMMARIZE_THRESHOLD, ConversationMemory
+from law_assistant.memory import RECENT_TOKEN_BUDGET, ConversationMemory
 
 
 class TestConversationMemory:
@@ -72,9 +72,10 @@ class TestConversationMemory:
             return summary
 
         mem.set_summarizer(mock_summarizer)
-        for i in range(SUMMARIZE_THRESHOLD + 2):
+        # Generate enough content to exceed RECENT_TOKEN_BUDGET (~3000 chars total)
+        for i in range(10):
             role = "user" if i % 2 == 0 else "assistant"
-            mem.add_message("chat_1", role, f"message {i}")
+            mem.add_message("chat_1", role, f"这是第{i}条消息，内容足够长以触发基于token的摘要压缩。" * 20)
 
         assert len(summaries) > 0
         conv = mem.conversations["chat_1"]
@@ -83,9 +84,10 @@ class TestConversationMemory:
     def test_formatted_history_with_summary(self):
         mem = ConversationMemory(max_history_turns=50)
         mem.set_summarizer(lambda msgs: "这是对话摘要")
-        for i in range(SUMMARIZE_THRESHOLD + 2):
+        # Generate enough content to exceed RECENT_TOKEN_BUDGET
+        for i in range(10):
             role = "user" if i % 2 == 0 else "assistant"
-            mem.add_message("chat_1", role, f"message {i}")
+            mem.add_message("chat_1", role, f"这是第{i}条消息，内容足够长以触发摘要。" * 20)
 
         formatted = mem.get_formatted_history("chat_1")
         assert "早期对话摘要" in formatted
@@ -95,7 +97,7 @@ class TestConversationMemory:
     def test_no_summarizer_no_crash(self):
         mem = ConversationMemory(max_history_turns=50)
         # No summarizer set — should not crash even with many messages
-        for i in range(SUMMARIZE_THRESHOLD + 2):
-            mem.add_message("chat_1", "user", f"message {i}")
+        for i in range(10):
+            mem.add_message("chat_1", "user", f"message {i}" * 50)
         history = mem.get_recent_history("chat_1")
         assert len(history) > 0

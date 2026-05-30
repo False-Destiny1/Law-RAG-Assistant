@@ -324,14 +324,18 @@ class DeepSeekApiRag:
         raise RuntimeError("所有嵌入模型均调用失败")
 
     def _summarize_messages(self, messages: list) -> str:
-        """用 LLM 将早期对话压缩为摘要"""
+        """用 LLM 将早期对话压缩为摘要（保留法律要点）"""
         if not messages:
             return ""
         history_text = "\n".join(
-            f"{'用户' if m['role'] == 'user' else '助手'}: {m['content'][:200]}" for m in messages
+            f"{'用户' if m['role'] == 'user' else '助手'}: {m['content'][:500]}" for m in messages
         )
         prompt = (
-            "请将以下对话历史压缩为一段简洁的摘要，保留关键事实、法律问题和结论，不超过200字。\n\n"
+            "请将以下对话历史压缩为一段简洁的摘要。要求：\n"
+            "1. 保留用户咨询的核心法律问题\n"
+            "2. 保留关键法律结论和建议\n"
+            "3. 保留涉及的法律条文编号\n"
+            "4. 不超过300字\n\n"
             f"对话历史：\n{history_text}\n\n摘要："
         )
         try:

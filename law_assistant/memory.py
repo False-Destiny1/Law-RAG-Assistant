@@ -5,8 +5,16 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-SUMMARIZE_THRESHOLD = 10  # 超过 10 条消息时触发摘要压缩
-SUMMARY_MAX_TOKENS = 300  # 摘要最大长度（粗估）
+# ── Token 预算配置 ──────────────────────────────────────────────────
+HISTORY_TOKEN_BUDGET = 2500   # 对话历史总 token 预算（不含检索上下文）
+SUMMARY_TOKEN_BUDGET = 500    # 摘要部分 token 预算
+RECENT_TOKEN_BUDGET = 2000    # 滑动窗口（近期消息）token 预算
+SUMMARY_MAX_CHARS = 600       # 摘要最大字符数
+
+
+def _estimate_tokens(text: str) -> int:
+    """粗略估算中文文本的 token 数（约 1.5 字符/token）"""
+    return max(1, len(text) * 2 // 3)
 
 
 class ConversationMemory:
@@ -89,15 +97,16 @@ class ConversationMemory:
             conversation = self.conversations[conversation_id]
             conversation["history"].append({"role": role, "content": content, "timestamp": datetime.now()})
 
-            # 检查是否需要摘要压缩（不在锁内执行 LLM 调用）
-            if len(conversation["history"]) > SUMMARIZE_THRESHOLD and self._summarizer:
+            # 检查是否需要摘要压缩（基于 token 预算，不在锁内执行 LLM 调用）
+            total_tokens = sum(_estimate_tokens(m["content"]) for m in conversation["history"])
+            if total_tokens > RECENT_TOKEN_BUDGET and self._summarizer and len(conversation["history"]) > 4:
                 split_at = len(conversation["history"]) // 2
                 if split_at % 2 != 0:
                     split_at += 1
                 # 只快照旧消息，不裁剪 history（裁剪推迟到摘要成功后）
                 need_summarize = True
 
-            # 保留最近N轮对话（兜底）
+            # 兜底：保留最近N轮对话（防止极端情况）
             max_messages = self.max_history_turns * 2
             if len(conversation["history"]) > max_messages:
                 conversation["history"] = conversation["history"][-max_messages:]
@@ -116,8 +125,8 @@ class ConversationMemory:
                     if conversation_id in self.conversations:
                         existing = self.conversations[conversation_id].get("summary", "")
                         combined = (existing + "\n" + new_summary) if existing else new_summary
-                        if len(combined) > SUMMARY_MAX_TOKENS * 2:
-                            combined = combined[-(SUMMARY_MAX_TOKENS * 2):]
+                        if len(combined) > SUMMARY_MAX_CHARS:
+                            combined = combined[-SUMMARY_MAX_CHARS:]
                         self.conversations[conversation_id]["summary"] = combined
                         # 摘要成功，才裁剪旧消息
                         self.conversations[conversation_id]["history"] = \
@@ -158,7 +167,7 @@ class ConversationMemory:
         return self._load_from_db(conversation_id)
 
     def get_formatted_history(self, conversation_id: str) -> str:
-        """获取格式化的对话历史（包含摘要）"""
+        """获取格式化的对话历史（token-aware 滑动窗口 + 摘要）"""
         # 先确保数据已加载到 L1（含 summary）
         self.get_recent_history(conversation_id)
 
@@ -173,15 +182,35 @@ class ConversationMemory:
             return "无对话历史"
 
         parts = []
+        used_tokens = 0
+
+        # Layer 1: 摘要（固定预算）
         if summary:
+            if _estimate_tokens(summary) > SUMMARY_TOKEN_BUDGET:
+                summary = summary[:int(SUMMARY_TOKEN_BUDGET * 1.5)]
             parts.append(f"【早期对话摘要】\n{summary}\n")
+            used_tokens += _estimate_tokens(summary)
             parts.append("【近期对话】\n")
         else:
             parts.append("最近的对话历史：\n")
 
-        for i, msg in enumerate(history):
+        # Layer 2: 滑动窗口（从最新消息向前，token 预算内）
+        recent_budget = min(RECENT_TOKEN_BUDGET, HISTORY_TOKEN_BUDGET - used_tokens)
+        selected = []
+        msg_tokens = 0
+        for msg in reversed(history):
+            line = f"{'用户' if msg['role'] == 'user' else '助手'}: {msg['content']}"
+            line_tokens = _estimate_tokens(line)
+            if msg_tokens + line_tokens > recent_budget and selected:
+                break
+            selected.append(msg)
+            msg_tokens += line_tokens
+        selected.reverse()
+
+        for i, msg in enumerate(selected):
             speaker = "用户" if msg["role"] == "user" else "助手"
             parts.append(f"{i + 1}. {speaker}: {msg['content']}")
+
         return "\n".join(parts) + "\n"
 
     def clear_conversation(self, conversation_id: str):
