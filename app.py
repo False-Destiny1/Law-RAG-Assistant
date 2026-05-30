@@ -743,6 +743,7 @@ def _process_document_async(file_path: str, doc_id: int, knowledge_base_id: int 
         # 将文档内容写入知识图谱
         try:
             from law_assistant.processor import DocumentProcessor
+
             content = DocumentProcessor()._load_file_content(file_path)
             if content and rag_model.knowledge_graph.is_available:
                 rag_model.knowledge_graph.build_from_text(content)
@@ -940,7 +941,12 @@ def create_chat(user: User = Depends(require_user), db: Session = Depends(get_db
     db.commit()
     db.refresh(new_chat)
 
-    return {"id": new_chat.id, "title": new_chat.title, "created_at": new_chat.created_at.isoformat(), "updated_at": new_chat.updated_at.isoformat() if new_chat.updated_at else new_chat.created_at.isoformat()}
+    return {
+        "id": new_chat.id,
+        "title": new_chat.title,
+        "created_at": new_chat.created_at.isoformat(),
+        "updated_at": new_chat.updated_at.isoformat() if new_chat.updated_at else new_chat.created_at.isoformat(),
+    }
 
 
 @app.put("/api/chats/{chat_id}")
@@ -965,7 +971,12 @@ async def update_chat(
     chat.updated_at = datetime.now(timezone.utc)
     db.commit()
 
-    return {"id": chat.id, "title": chat.title, "knowledge_base_id": chat.knowledge_base_id, "updated_at": chat.updated_at.isoformat() if chat.updated_at else None}
+    return {
+        "id": chat.id,
+        "title": chat.title,
+        "knowledge_base_id": chat.knowledge_base_id,
+        "updated_at": chat.updated_at.isoformat() if chat.updated_at else None,
+    }
 
 
 @app.delete("/api/chats/{chat_id}")
@@ -1051,9 +1062,11 @@ def submit_feedback(
 ):
     if rating not in ("up", "down"):
         return JSONResponse({"error": "rating 必须为 up 或 down"}, status_code=400)
-    existing = db.query(MessageFeedback).filter(
-        MessageFeedback.user_id == user.id, MessageFeedback.message_id == message_id
-    ).first()
+    existing = (
+        db.query(MessageFeedback)
+        .filter(MessageFeedback.user_id == user.id, MessageFeedback.message_id == message_id)
+        .first()
+    )
     if existing:
         existing.rating = rating
     else:

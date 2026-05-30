@@ -6,7 +6,9 @@ from law_assistant.bm25 import BM25Retriever
 class TestBM25Retriever:
     def test_add_and_search(self):
         retriever = BM25Retriever(rebuild_threshold=5)
-        retriever.add_documents(["合同法规定了合同的订立和效力", "刑法规定了犯罪和刑罚", "民法调整平等主体之间的人身关系"])
+        retriever.add_documents(
+            ["合同法规定了合同的订立和效力", "刑法规定了犯罪和刑罚", "民法调整平等主体之间的人身关系"]
+        )
         retriever.force_rebuild()
         results = retriever.search("合同", top_k=2)
         assert len(results) > 0

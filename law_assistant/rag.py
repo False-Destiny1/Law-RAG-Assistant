@@ -1,5 +1,6 @@
 import atexit
 import concurrent.futures
+import contextlib
 import hashlib
 import json
 import logging
@@ -35,6 +36,7 @@ def _cuda_available() -> bool:
     """检测 CUDA 是否可用"""
     try:
         import torch
+
         return torch.cuda.is_available()
     except ImportError:
         return False
@@ -133,6 +135,7 @@ class DeepSeekApiRag:
 
         if reranker_provider == "local":
             from sentence_transformers import CrossEncoder
+
             reranker_model_path = os.getenv("RERANKER_MODEL_PATH", "BAAI/bge-reranker-v2-m3")
             device = "cuda" if _cuda_available() else "cpu"
             self._local_reranker = CrossEncoder(reranker_model_path, max_length=512, device=device)
@@ -237,7 +240,7 @@ class DeepSeekApiRag:
             try:
                 pairs = [[query, doc] for doc in documents[:20]]
                 scores = self._local_reranker.predict(pairs)
-                scored = list(zip(documents[:20], scores))
+                scored = list(zip(documents[:20], scores, strict=False))
                 scored.sort(key=lambda x: x[1], reverse=True)
                 logger.info(f"本地 Reranker 返回 {len(scored)} 个结果")
                 return [(doc, float(score)) for doc, score in scored[:top_k]]
@@ -327,9 +330,7 @@ class DeepSeekApiRag:
         """用 LLM 将早期对话压缩为摘要（保留法律要点）"""
         if not messages:
             return ""
-        history_text = "\n".join(
-            f"{'用户' if m['role'] == 'user' else '助手'}: {m['content'][:500]}" for m in messages
-        )
+        history_text = "\n".join(f"{'用户' if m['role'] == 'user' else '助手'}: {m['content'][:500]}" for m in messages)
         prompt = (
             "请将以下对话历史压缩为一段简洁的摘要。要求：\n"
             "1. 保留用户咨询的核心法律问题\n"
@@ -647,6 +648,7 @@ class DeepSeekApiRag:
     def _get_retrieval_cache_key(self, query: str, knowledge_base_id: int = None) -> str | None:
         """生成检索缓存 key（基于查询内容 + 知识库 ID）"""
         import hashlib as _hashlib
+
         raw = f"{query}|kb={knowledge_base_id or ''}"
         return f"retrieval_cache:{_hashlib.md5(raw.encode()).hexdigest()}"
 
@@ -795,10 +797,8 @@ class DeepSeekApiRag:
             # 锁内写回缓存（LRU 淘汰 + 插入）
             with self._cache_lock:
                 if len(self._kb_texts_cache) >= self._KB_CACHE_MAX_SIZE:
-                    try:
+                    with contextlib.suppress(StopIteration, RuntimeError):
                         self._kb_texts_cache.popitem(last=False)
-                    except (StopIteration, RuntimeError):
-                        pass
                 self._kb_texts_cache[knowledge_base_id] = texts
             # Write-through to Redis
             try:
@@ -874,6 +874,7 @@ class DeepSeekApiRag:
         logger.info(f"开始惰性重建 FAISS 索引（{len(docs)} 个文档）...")
         try:
             from langchain_community.vectorstores.faiss import FAISS
+
             new_db = FAISS.from_texts(docs, self.embedding_model, metadatas=[{"source": "bm25_rebuild"} for _ in docs])
             # Atomic swap + save under lock
             with self._faiss_write_lock:

@@ -1,6 +1,6 @@
 """Unit tests for law_assistant.memory module."""
 
-from law_assistant.memory import RECENT_TOKEN_BUDGET, ConversationMemory
+from law_assistant.memory import ConversationMemory
 
 
 class TestConversationMemory:

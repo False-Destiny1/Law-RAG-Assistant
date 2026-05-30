@@ -6,10 +6,10 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 # ── Token 预算配置 ──────────────────────────────────────────────────
-HISTORY_TOKEN_BUDGET = 2500   # 对话历史总 token 预算（不含检索上下文）
-SUMMARY_TOKEN_BUDGET = 500    # 摘要部分 token 预算
-RECENT_TOKEN_BUDGET = 2000    # 滑动窗口（近期消息）token 预算
-SUMMARY_MAX_CHARS = 600       # 摘要最大字符数
+HISTORY_TOKEN_BUDGET = 2500  # 对话历史总 token 预算（不含检索上下文）
+SUMMARY_TOKEN_BUDGET = 500  # 摘要部分 token 预算
+RECENT_TOKEN_BUDGET = 2000  # 滑动窗口（近期消息）token 预算
+SUMMARY_MAX_CHARS = 600  # 摘要最大字符数
 
 
 def _estimate_tokens(text: str) -> int:
@@ -129,8 +129,9 @@ class ConversationMemory:
                             combined = combined[-SUMMARY_MAX_CHARS:]
                         self.conversations[conversation_id]["summary"] = combined
                         # 摘要成功，才裁剪旧消息
-                        self.conversations[conversation_id]["history"] = \
-                            self.conversations[conversation_id]["history"][split_at:]
+                        self.conversations[conversation_id]["history"] = self.conversations[conversation_id]["history"][
+                            split_at:
+                        ]
                 logger.info(f"对话 {conversation_id} 摘要压缩: {len(old_messages)} 条消息 → 摘要")
             except Exception as e:
                 logger.warning(f"对话摘要失败，保留完整历史: {e}")
@@ -157,7 +158,9 @@ class ConversationMemory:
                     if len(self.conversations) >= self.MAX_CACHED_CONVERSATIONS:
                         self.conversations.popitem(last=False)
                     self.conversations[conversation_id] = {
-                        "history": history, "summary": summary, "created_at": datetime.now()
+                        "history": history,
+                        "summary": summary,
+                        "created_at": datetime.now(),
                     }
                 return history
         except Exception:
@@ -187,7 +190,7 @@ class ConversationMemory:
         # Layer 1: 摘要（固定预算）
         if summary:
             if _estimate_tokens(summary) > SUMMARY_TOKEN_BUDGET:
-                summary = summary[:int(SUMMARY_TOKEN_BUDGET * 1.5)]
+                summary = summary[: int(SUMMARY_TOKEN_BUDGET * 1.5)]
             parts.append(f"【早期对话摘要】\n{summary}\n")
             used_tokens += _estimate_tokens(summary)
             parts.append("【近期对话】\n")
