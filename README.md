@@ -4,7 +4,7 @@
 
 基于 RAG（Retrieval-Augmented Generation）架构的智能法律问答系统，集成了用户权限管理、多格式文档解析（含 OCR）、智能问答交互、知识库动态管理等核心模块。
 
-**技术栈：** FastAPI + PostgreSQL + Redis + FAISS + BM25 + Neo4j 知识图谱 + DashScope Reranker + PaddleOCR + BAAI/bge-small-zh-v1.5 + MiMo LLM
+**技术栈：** FastAPI + PostgreSQL + Redis + FAISS + BM25 + Neo4j 知识图谱 + BAAI/bge-reranker-v2-m3 (本地) + PaddleOCR + BAAI/bge-small-zh-v1.5 + MiMo LLM
 
 ---
 
@@ -46,9 +46,8 @@ pip install -r requirements.txt
 | psycopg2-binary | ≥2.9 | PostgreSQL 驱动 |
 | langchain | ≥0.3 | LLM 编排框架 |
 | faiss-cpu | ≥1.7 | 向量数据库 |
-| sentence-transformers | ≥3.0 | 嵌入模型 |
+| sentence-transformers | ≥3.0 | 嵌入模型 + 本地 Reranker |
 | rank-bm25 | ≥0.2 | BM25 检索 |
-| dashscope | ≥1.17 | Reranker API |
 | paddleocr | ≥3.5 | 扫描文档 OCR |
 | jieba | ≥0.42 | 中文分词 |
 | bcrypt | ≥4.0 | 密码加密 |
@@ -78,10 +77,14 @@ EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5
 # ── 向量数据库 ──
 VECTOR_DB_PATH=law_faiss
 
-# ── Reranker（DashScope）──
-RERANKER_API_KEY=你的DashScope密钥
-RERANKER_BASE_URL=https://dashscope.aliyuncs.com/api/v1/services/reranking/reranking
-RERANKER_MODEL=gte-rerank
+# ── Reranker（本地模型，默认）──
+RERANKER_PROVIDER=local
+RERANKER_MODEL_PATH=BAAI/bge-reranker-v2-m3
+
+# ── Reranker（DashScope API，可选）──
+# RERANKER_PROVIDER=dashscope
+# RERANKER_API_KEY=你的DashScope密钥
+# RERANKER_MODEL=gte-rerank
 
 # ── 检索权重（三路融合）──
 VECTOR_RETRIEVAL_WEIGHT=0.4
@@ -222,6 +225,7 @@ law_assistant-main/
 - `law_faiss/` — FAISS 向量索引
 - `bm25_index.pkl` — BM25 关键词索引
 - `BAAI/bge-small-zh-v1.5/` — 本地嵌入模型
+- `BAAI/bge-reranker-v2-m3/` — 本地 Reranker 模型
 
 ---
 
@@ -246,7 +250,7 @@ FastAPI /ask_stream (SSE 流式)
     │       ├── 每个查询：FAISS 向量检索（0.4）‖ BM25 关键词检索（0.3）‖ Neo4j 图谱检索（0.3）
     │       └── 加权融合 → 候选文档
     │
-    ├─── DashScope Reranker（gte-rerank）
+    ├─── 本地 CrossEncoder Reranker（bge-reranker-v2-m3）
     │       └── 精排 → 相关性阈值过滤（0.15）
     │
     ├─── 知识库过滤（可选，按 knowledge_base_id）
@@ -262,7 +266,7 @@ FastAPI /ask_stream (SSE 流式)
     └─── 保存对话记忆 + 写入 PostgreSQL
 ```
 
-**每次请求共 2 次 LLM 调用**（查询分析 + 回答生成）+ 1 次 Reranker 网络调用。
+**每次请求共 2 次 LLM 调用**（查询分析 + 回答生成）+ 1 次本地 Reranker 推理。
 
 ---
 
@@ -278,7 +282,7 @@ FastAPI /ask_stream (SSE 流式)
 | 文档上传 | PDF/DOCX/TXT/JPG/PNG，自动向量化 | 专家/管理员 |
 | OCR 识别 | 扫描版 PDF 和图片自动 PaddleOCR 文字识别 | 专家/管理员 |
 | 三路融合检索 | 向量语义 + BM25 关键词 + 知识图谱，并行执行 | 系统自动 |
-| 重排序 | DashScope Reranker 精排，超时自动回退 | 系统自动 |
+| 重排序 | 本地 CrossEncoder Reranker 精排（可选 DashScope API） | 系统自动 |
 | 安全防护 | 提示词注入检测（输入过滤 + 上下文清洗 + 提示词加固） | 系统自动 |
 
 ---
@@ -312,7 +316,7 @@ pip install torch --index-url https://download.pytorch.org/whl/cu126
 ```
 
 **Q: Reranker 返回 400/404**
-检查 `.env` 中 `RERANKER_API_KEY` 和 `RERANKER_BASE_URL` 是否正确。
+默认使用本地模型，无需 API 密钥。如果切换到 DashScope 模式（`RERANKER_PROVIDER=dashscope`），检查 `.env` 中 `RERANKER_API_KEY` 是否正确。
 
 **Q: 扫描 PDF 无法识别文字**
 确保安装了 PaddleOCR 和 poppler：
@@ -350,7 +354,7 @@ Neo4j 为可选组件，不安装时系统自动降级为双路检索（向量 +
 2. 在 `.env` 中配置 `NEO4J_URI`、`NEO4J_USER`、`NEO4J_PASSWORD`
 3. 安装 Python 驱动：`pip install neo4j>=5.0.0`
 4. 首次使用需构建图谱：运行 `rag.build_knowledge_graph("knowledge_base/")`
-5. 使用 `start.bat` 启动会自动启动 Neo4j（需修改脚本中的 `NEO4J_HOME` 路径）
+5. 使用 `start.bat` 启动会自动发现并启动 Neo4j（支持 `C:\neo4j` 和 `E:\neo4j*` 路径）
 
 ```bash
 # Docker 方式运行 Neo4j

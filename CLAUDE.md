@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-RAG-based intelligent legal Q&A system (Chinese law). Users ask legal questions and get answers grounded in a knowledge base of 80+ Chinese law full-text documents. The system uses three-way fusion retrieval (FAISS vector + BM25 keyword + Neo4j knowledge graph), DashScope reranker, and MiMo LLM for streaming generation.
+RAG-based intelligent legal Q&A system (Chinese law). Users ask legal questions and get answers grounded in a knowledge base of 80+ Chinese law full-text documents. The system uses three-way fusion retrieval (FAISS vector + BM25 keyword + Neo4j knowledge graph), local CrossEncoder reranker (BAAI/bge-reranker-v2-m3), and MiMo LLM for streaming generation.
 
 ## Running the Server
 
@@ -28,8 +28,9 @@ First startup builds FAISS vector index and BM25 index from `knowledge_base/` (t
 
 Requires a `.env` file with at minimum:
 - `MIMO_API_KEY` (or `DEEPSEEK_API_KEY` as fallback) - LLM API key
-- `RERANKER_API_KEY` - DashScope reranker key
-- Optional: `EMBEDDING_PROVIDER=local|dashscope`, `VECTOR_DB_PATH`, `DATABASE_URL`, `RELEVANCE_THRESHOLD`, retrieval weights
+- `DATABASE_URL` - PostgreSQL connection string
+- Optional: `EMBEDDING_PROVIDER=local|dashscope`, `VECTOR_DB_PATH`, `RELEVANCE_THRESHOLD`, retrieval weights
+- Optional reranker: `RERANKER_PROVIDER=local|dashscope` (default: local), `RERANKER_MODEL_PATH` (default: `BAAI/bge-reranker-v2-m3`)
 - Optional Neo4j: `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`, `NEO4J_DATABASE`, `GRAPH_RETRIEVAL_WEIGHT`
 
 ## Architecture
@@ -39,7 +40,7 @@ Requires a `.env` file with at minimum:
 1. Query analysis (1 LLM call): conversational rewrite + terminology rewrite + query decomposition + HyDE doc generation — all in a single `analyze_query()` call using structured JSON output
 2. Parallel three-way fusion retrieval: main query + sub-queries + HyDE doc run concurrently via `ThreadPoolExecutor`, each doing FAISS vector search (weight 0.4) + BM25 keyword search (weight 0.3) + Neo4j graph search (weight 0.3)
 3. Candidate deduplication and fusion across all sub-query results
-4. DashScope reranker (`gte-rerank`) on merged candidates
+4. Local CrossEncoder reranker (`BAAI/bge-reranker-v2-m3`) on merged candidates (fallback: DashScope API via `RERANKER_PROVIDER=dashscope`)
 5. Relevance threshold filtering: results below `RELEVANCE_THRESHOLD` (default 0.15) are discarded
 6. Optional knowledge base filtering by `knowledge_base_id` metadata
 7. Prompt assembly: retrieved context with citation tags `[来源N]` + conversation history + system prompt from `law_assistant/prompts.yaml`
@@ -70,13 +71,13 @@ Total LLM calls per request: 2 (1 for query analysis, 1 for answer generation)
 - BM25 index uses lazy batch rebuild (threshold: 50 pending documents) rather than per-document updates; single file upload forces immediate rebuild
 - Knowledge graph: Neo4j backend (`law_assistant/graph.py`), rule-based entity extraction (laws, articles, chapters, concepts, citations). Graph search via entity linking + 1-2 hop subgraph traversal. Neo4j is optional — system degrades to dual-path (vector + BM25) if unavailable. Requires `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD` in `.env`
 - Retrieval weights: vector 0.4 + BM25 0.3 + graph 0.3 (configurable via env vars)
-- Session tokens are simple `user_id:random_hex` format (not JWT)
+- Session tokens are HMAC-signed `user_id:random_hex:timestamp:signature` format (not JWT), with 24h server-side expiry
 - Document uploads (PDF/DOCX/TXT) are expert/admin only
 - Query analysis: single LLM call (`analyze_query()`) does conversational rewrite + terminology rewrite + query decomposition + HyDE doc generation via structured JSON output
 - Parallel retrieval: sub-queries and HyDE doc are retrieved concurrently via `ThreadPoolExecutor`
 - Citation: context uses `[来源N]` tags; prompt instructs LLM to cite sources in answers
 - Relevance threshold: `RELEVANCE_THRESHOLD` (default 0.15) filters out low-scoring reranker results
-- Document deletion: removes text chunks from BM25 index before deleting file (FAISS vectors not removed — full rebuild needed)
+- Document deletion: removes text chunks from BM25 index before deleting file; FAISS marked as dirty and lazily rebuilt on next query
 - Document upload: uses FastAPI `BackgroundTasks` for async index building
-- Conversation memory: in-memory cache with DB fallback (`_load_from_db`)
+- Conversation memory: 3-tier caching (L1 OrderedDict LRU + L2 Redis + L3 DB fallback), with LLM-based summarization for long histories
 - Multi-knowledge base: `knowledge_base_id` passed to `retrieve_documents()` for metadata filtering, no temp RAG instances

@@ -1,4 +1,5 @@
 @echo off
+setlocal enabledelayedexpansion
 chcp 65001 >nul 2>&1
 title Law Assistant - FastAPI
 
@@ -31,9 +32,10 @@ if not defined REDIS_EXE (
     )
 )
 
-:: Resolve Neo4j — prefer NEO4J_HOME env var
+:: Resolve Neo4j — prefer NEO4J_HOME env var, then common install paths
 if not defined NEO4J_HOME (
     if exist "C:\neo4j" set "NEO4J_HOME=C:\neo4j"
+    if not defined NEO4J_HOME if exist "E:\neo4j-chs-community-5.26.2-windows" set "NEO4J_HOME=E:\neo4j-chs-community-5.26.2-windows"
 )
 
 %PYTHON_EXE% --version
@@ -66,7 +68,7 @@ echo.
 
 :: Auto-start Neo4j
 echo Checking Neo4j...
-set "NEO4J_NEED_WAIT="
+set "NEO4J_NEED_WAIT=0"
 netstat -an | findstr "7687" | findstr "LISTENING" >nul 2>&1
 if %errorlevel%==0 (
     echo Neo4j is already running on port 7687
@@ -78,24 +80,22 @@ if %errorlevel%==0 (
         echo Starting Neo4j...
         start "Neo4j" cmd /c ""%NEO4J_HOME%\bin\neo4j.bat" console"
         set "NEO4J_NEED_WAIT=1"
+        echo Waiting for Neo4j to start...
+        set NEO4J_WAIT=0
     )
 )
-if defined NEO4J_NEED_WAIT (
-    echo Waiting for Neo4j to start...
-    set NEO4J_WAIT=0
-)
 :wait_neo4j
-if defined NEO4J_NEED_WAIT (
+if "!NEO4J_NEED_WAIT!"=="1" (
     timeout /t 5 >nul
     set /a NEO4J_WAIT+=5
     netstat -an | findstr "7687" | findstr "LISTENING" >nul 2>&1
-    if %errorlevel%==0 (
+    if !errorlevel!==0 (
         echo Neo4j started successfully
-        set "NEO4J_NEED_WAIT="
+        set "NEO4J_NEED_WAIT=0"
     ) else (
-        if %NEO4J_WAIT% LSS 60 goto wait_neo4j
+        if !NEO4J_WAIT! LSS 60 goto wait_neo4j
         echo [WARN] Neo4j failed to start within 60 seconds
-        set "NEO4J_NEED_WAIT="
+        set "NEO4J_NEED_WAIT=0"
     )
 )
 echo.
