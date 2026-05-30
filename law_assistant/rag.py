@@ -70,9 +70,19 @@ class DeepSeekApiRag:
                 local_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), embedding_model_name)
                 if os.path.isdir(local_path):
                     model_path = local_path
-            logger.info(f"使用本地嵌入模型: {model_path}")
+            # 自动检测 CUDA 可用性
+            device = "cuda"
+            try:
+                import torch
+                if not torch.cuda.is_available():
+                    device = "cpu"
+                    logger.warning("CUDA 不可用，回退到 CPU 模式（推理速度会较慢）")
+            except ImportError:
+                device = "cpu"
+                logger.warning("PyTorch 未安装或无 CUDA 支持，使用 CPU 模式")
+            logger.info(f"使用本地嵌入模型: {model_path} (device={device})")
             self.embedding_model = HuggingFaceEmbeddings(
-                model_name=model_path, model_kwargs={"device": "cuda"}, encode_kwargs={"normalize_embeddings": True}
+                model_name=model_path, model_kwargs={"device": device}, encode_kwargs={"normalize_embeddings": True}
             )
             self.fallback_embedding_model = None
 
@@ -116,6 +126,7 @@ class DeepSeekApiRag:
 
         # 7. 初始化记忆模块
         self.memory = ConversationMemory(max_history_turns=5)
+        self.memory.set_summarizer(self._summarize_messages)
         # 知识库模型类（由 app.py 注入，避免循环导入）
         self._knowledge_base_model = None
 
@@ -273,6 +284,24 @@ class DeepSeekApiRag:
                     time.sleep(wait_time)
 
         raise RuntimeError("所有嵌入模型均调用失败")
+
+    def _summarize_messages(self, messages: list) -> str:
+        """用 LLM 将早期对话压缩为摘要"""
+        if not messages:
+            return ""
+        history_text = "\n".join(
+            f"{'用户' if m['role'] == 'user' else '助手'}: {m['content'][:200]}" for m in messages
+        )
+        prompt = (
+            "请将以下对话历史压缩为一段简洁的摘要，保留关键事实、法律问题和结论，不超过200字。\n\n"
+            f"对话历史：\n{history_text}\n\n摘要："
+        )
+        try:
+            response = self.llm.invoke(prompt)
+            return response.content.strip()
+        except Exception as e:
+            logger.warning(f"对话摘要生成失败: {e}")
+            return ""
 
     def analyze_query(self, query: str, conversation_id: str = None, conversation_history: str = None) -> dict:
         """一次 LLM 调用完成：多轮融合 + 术语改写 + 查询分解 + HyDE 文档生成
@@ -569,6 +598,12 @@ class DeepSeekApiRag:
 
         return final_results
 
+    def _get_retrieval_cache_key(self, query: str, knowledge_base_id: int = None) -> str | None:
+        """生成检索缓存 key（基于查询内容 + 知识库 ID）"""
+        import hashlib as _hashlib
+        raw = f"{query}|kb={knowledge_base_id or ''}"
+        return f"retrieval_cache:{_hashlib.md5(raw.encode()).hexdigest()}"
+
     def retrieve_documents(
         self,
         query: str,
@@ -579,6 +614,19 @@ class DeepSeekApiRag:
         db_session=None,
     ) -> list[tuple[str, float]]:
         """混合检索 + 多子查询并行 + HyDE + 重排序 + 相关性过滤"""
+        # 尝试检索缓存（仅对简单查询生效，有子查询时跳过）
+        if not sub_queries and not hypothetical_doc:
+            try:
+                from law_assistant.redis_utils import cache_get_json, cache_set_json
+
+                cache_key = self._get_retrieval_cache_key(query, knowledge_base_id)
+                cached = cache_get_json(cache_key)
+                if cached:
+                    logger.info(f"检索缓存命中: {query[:30]}...")
+                    return [(doc, score) for doc, score in cached]
+            except Exception:
+                pass
+
         # 收集所有候选文档（去重）
         all_candidates = {}
 
@@ -635,6 +683,17 @@ class DeepSeekApiRag:
             reranked_docs = filtered
 
         logger.info(f"重排序后返回 {len(reranked_docs)} 个最终结果")
+
+        # 写入检索缓存（TTL 10 分钟）
+        if not sub_queries and not hypothetical_doc and reranked_docs:
+            try:
+                from law_assistant.redis_utils import cache_set_json
+
+                cache_key = self._get_retrieval_cache_key(query, knowledge_base_id)
+                cache_set_json(cache_key, reranked_docs, ttl=600)
+            except Exception:
+                pass
+
         return reranked_docs
 
     def _get_knowledge_base_texts(self, knowledge_base_id: int, db_session) -> set:
@@ -731,6 +790,11 @@ class DeepSeekApiRag:
             except Exception as e:
                 logger.warning(f"Redis 缓存清除失败 (kb_texts:{knowledge_base_id}): {e}")
 
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        """粗略估算中文文本的 token 数（约 1.5 字符/token）"""
+        return max(1, len(text) // 2)
+
     def generate_response_stream(
         self,
         query: str,
@@ -780,13 +844,21 @@ class DeepSeekApiRag:
             logger.warning(f"文档检索失败，使用空上下文: {e}")
             retrieved_docs = []
 
-        # 构建上下文（带引用编号）
+        # 构建上下文（带引用编号 + token 预算保护）
+        MAX_CONTEXT_TOKENS = int(os.getenv("MAX_CONTEXT_TOKENS", "3000"))
         context_parts = []
+        estimated_tokens = 0
 
         if retrieved_docs:
             for i, (doc, score) in enumerate(retrieved_docs):
                 safe_doc = sanitize_context(doc)
-                context_parts.append(f"【来源{i + 1}】(相关度:{score:.2f}): {safe_doc}")
+                part = f"【来源{i + 1}】(相关度:{score:.2f}): {safe_doc}"
+                part_tokens = self._estimate_tokens(part)
+                if estimated_tokens + part_tokens > MAX_CONTEXT_TOKENS and context_parts:
+                    logger.info(f"上下文 token 预算已达上限，截断到 {len(context_parts)}/{len(retrieved_docs)} 个文档")
+                    break
+                context_parts.append(part)
+                estimated_tokens += part_tokens
 
         context = "\n\n".join(context_parts) if context_parts else "无相关上下文"
 

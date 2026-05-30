@@ -1,10 +1,16 @@
+import logging
 import threading
 from collections import OrderedDict
 from datetime import datetime
 
+logger = logging.getLogger(__name__)
+
+SUMMARIZE_THRESHOLD = 10  # 超过 10 条消息时触发摘要压缩
+SUMMARY_MAX_TOKENS = 300  # 摘要最大长度（粗估）
+
 
 class ConversationMemory:
-    """对话记忆管理类（L1 内存缓存 + L2 Redis + L3 DB 持久化回退，LRU 淘汰）"""
+    """对话记忆管理类（L1 内存缓存 + L2 Redis + L3 DB 持久化回退，LRU 淘汰 + 自动摘要压缩）"""
 
     MAX_CACHED_CONVERSATIONS = 500
 
@@ -15,6 +21,12 @@ class ConversationMemory:
         # 依赖注入：DB session 工厂和 Message 模型（避免从 app.py 循环导入）
         self._db_session_factory = db_session_factory
         self._message_model = message_model
+        # 摘要生成器（由 rag.py 注入，签名: (messages: list[dict]) -> str）
+        self._summarizer = None
+
+    def set_summarizer(self, summarizer):
+        """注入摘要生成器（签名: (messages: list[dict]) -> str）"""
+        self._summarizer = summarizer
 
     def _serialize_history(self, history: list) -> list:
         """将历史记录序列化为 JSON 兼容格式"""
@@ -43,6 +55,40 @@ class ConversationMemory:
             result.append(item)
         return result
 
+    def _try_summarize(self, conversation_id: str):
+        """当对话历史超过阈值时，用 LLM 摘要压缩早期消息"""
+        conversation = self.conversations.get(conversation_id)
+        if not conversation or not self._summarizer:
+            return
+        history = conversation["history"]
+        if len(history) <= SUMMARIZE_THRESHOLD:
+            return
+        # 取前半部分做摘要，保留后半部分作为近期上下文
+        split_at = len(history) // 2
+        # 确保保留偶数条消息（完整的用户-助手对）
+        if split_at % 2 != 0:
+            split_at += 1
+        old_messages = history[:split_at]
+        recent_messages = history[split_at:]
+        try:
+            new_summary = self._summarizer(old_messages)
+            existing_summary = conversation.get("summary", "")
+            if existing_summary:
+                combined = existing_summary + "\n" + new_summary
+            else:
+                combined = new_summary
+            # 控制摘要长度
+            if len(combined) > SUMMARY_MAX_TOKENS * 2:
+                combined = combined[-(SUMMARY_MAX_TOKENS * 2):]
+            conversation["summary"] = combined
+            conversation["history"] = recent_messages
+            logger.info(
+                f"对话 {conversation_id} 摘要压缩: {len(old_messages)} 条消息 → 摘要, "
+                f"保留 {len(recent_messages)} 条近期消息"
+            )
+        except Exception as e:
+            logger.warning(f"对话摘要生成失败: {e}")
+
     def _write_to_redis(self, conversation_id: str):
         """将当前对话数据写入 Redis（调用前需已持有 self._lock 或数据已就绪）"""
         try:
@@ -52,6 +98,7 @@ class ConversationMemory:
             if conversation:
                 serializable = {
                     "history": self._serialize_history(conversation["history"]),
+                    "summary": conversation.get("summary", ""),
                     "created_at": conversation["created_at"].isoformat(),
                 }
                 cache_set_json(f"conv:{conversation_id}", serializable, ttl=86400)
@@ -59,13 +106,13 @@ class ConversationMemory:
             pass
 
     def add_message(self, conversation_id: str, role: str, content: str):
-        """添加消息到对话历史（内存缓存 + LRU 淘汰，线程安全）"""
+        """添加消息到对话历史（内存缓存 + LRU 淘汰 + 自动摘要，线程安全）"""
         with self._lock:
             if conversation_id not in self.conversations:
                 # LRU 淘汰：超过上限时移除最旧的对话
                 while len(self.conversations) >= self.MAX_CACHED_CONVERSATIONS:
                     self.conversations.popitem(last=False)
-                self.conversations[conversation_id] = {"history": [], "created_at": datetime.now()}
+                self.conversations[conversation_id] = {"history": [], "summary": "", "created_at": datetime.now()}
             else:
                 # 移到末尾（最近使用）
                 self.conversations.move_to_end(conversation_id)
@@ -73,7 +120,10 @@ class ConversationMemory:
             conversation = self.conversations[conversation_id]
             conversation["history"].append({"role": role, "content": content, "timestamp": datetime.now()})
 
-            # 保留最近N轮对话
+            # 尝试摘要压缩（超过阈值时自动触发）
+            self._try_summarize(conversation_id)
+
+            # 保留最近N轮对话（摘要压缩后通常不会触发，作为兜底）
             max_messages = self.max_history_turns * 2
             if len(conversation["history"]) > max_messages:
                 conversation["history"] = conversation["history"][-max_messages:]
@@ -95,11 +145,14 @@ class ConversationMemory:
             cached = cache_get_json(f"conv:{conversation_id}")
             if cached and "history" in cached:
                 history = self._deserialize_history(cached["history"])
+                summary = cached.get("summary", "")
                 # 回填 L1（放在末尾，标记为最近使用）
                 with self._lock:
                     if len(self.conversations) >= self.MAX_CACHED_CONVERSATIONS:
                         self.conversations.popitem(last=False)
-                    self.conversations[conversation_id] = {"history": history, "created_at": datetime.now()}
+                    self.conversations[conversation_id] = {
+                        "history": history, "summary": summary, "created_at": datetime.now()
+                    }
                 return history
         except Exception:
             pass
@@ -108,12 +161,27 @@ class ConversationMemory:
         return self._load_from_db(conversation_id)
 
     def get_formatted_history(self, conversation_id: str) -> str:
-        """获取格式化的对话历史"""
-        history = self.get_recent_history(conversation_id)
-        if not history:
+        """获取格式化的对话历史（包含摘要）"""
+        # 先确保数据已加载到 L1（含 summary）
+        self.get_recent_history(conversation_id)
+
+        with self._lock:
+            conversation = self.conversations.get(conversation_id)
+            if not conversation:
+                return "无对话历史"
+            summary = conversation.get("summary", "")
+            history = list(conversation["history"])
+
+        if not history and not summary:
             return "无对话历史"
 
-        parts = ["最近的对话历史：\n"]
+        parts = []
+        if summary:
+            parts.append(f"【早期对话摘要】\n{summary}\n")
+            parts.append("【近期对话】\n")
+        else:
+            parts.append("最近的对话历史：\n")
+
         for i, msg in enumerate(history):
             speaker = "用户" if msg["role"] == "user" else "助手"
             parts.append(f"{i + 1}. {speaker}: {msg['content']}")

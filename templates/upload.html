@@ -39,6 +39,9 @@
     .empty-state { text-align: center; padding: var(--sp-10) 0; color: var(--c-text-muted); }
     .empty-state .icon { font-size: 2.5rem; opacity: 0.3; margin-bottom: var(--sp-3); }
     @media (max-width: 768px) { .page-sidebar { display: none; } .page-main { padding: var(--sp-4); } }
+    .upload-progress { display: none; height: 6px; background: var(--c-border-light); border-radius: 3px; margin: var(--sp-3) 0; overflow: hidden; }
+    .upload-progress-bar { height: 100%; background: var(--c-primary); border-radius: 3px; transition: width 0.3s ease; width: 0%; }
+    .upload-toast { display: none; padding: var(--sp-3) var(--sp-4); background: #fdf2f2; color: #c62828; border: 1px solid #f5c6cb; border-radius: var(--radius-sm); margin-bottom: var(--sp-4); font-size: var(--text-sm); }
 </style>
 {% endblock %}
 
@@ -120,11 +123,21 @@
                             <span>{{ doc.file_type|upper }}</span>
                             <span>{{ "%.2f"|format(doc.file_size / 1024 / 1024) }} MB</span>
                             <span>{{ doc.uploaded_at.strftime('%Y-%m-%d %H:%M') }}</span>
+                            {% if doc.status == 'completed' %}<span style="color:#2e7d32;">已完成</span>
+                            {% elif doc.status == 'processing' %}<span style="color:#f57c00;">处理中...</span>
+                            {% elif doc.status == 'failed' %}<span style="color:#c62828;">处理失败</span>
+                            {% elif doc.status == 'pending' %}<span style="color:#1565c0;">等待处理</span>
+                            {% endif %}
                             {% if doc.knowledge_base %}
                             <span class="doc-kb-tag">{{ doc.knowledge_base.name }}</span>
                             {% endif %}
                         </div>
                     </div>
+                    {% if doc.status == 'failed' %}
+                    <button onclick="reprocessDocument({{ doc.id }})" class="btn btn-ghost btn-sm" style="color:var(--c-primary);" title="重新处理">
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>
+                    </button>
+                    {% endif %}
                     <button onclick="deleteDocument({{ doc.id }})" class="btn btn-ghost btn-sm" style="color:var(--c-error);" title="删除">
                         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
                     </button>
@@ -177,15 +190,85 @@ document.addEventListener('DOMContentLoaded', function() {
         fileDrop.style.display = '';
     });
 
-    document.getElementById('uploadForm').addEventListener('submit', function() {
-        document.getElementById('submitBtn').disabled = true;
-        document.getElementById('submitBtn').textContent = '上传中...';
+    document.getElementById('uploadForm').addEventListener('submit', function(e) {
+        e.preventDefault();
+        const btn = document.getElementById('submitBtn');
+        btn.disabled = true;
+        btn.textContent = '上传中...';
+
+        // Show progress bar
+        let progressBar = document.getElementById('uploadProgress');
+        if (!progressBar) {
+            progressBar = document.createElement('div');
+            progressBar.id = 'uploadProgress';
+            progressBar.className = 'upload-progress';
+            progressBar.innerHTML = '<div class="upload-progress-bar" id="uploadProgressBar"></div>';
+            btn.parentNode.insertBefore(progressBar, btn);
+        }
+        progressBar.style.display = 'block';
+        document.getElementById('uploadProgressBar').style.width = '0%';
+
+        const formData = new FormData(this);
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', '/upload');
+
+        xhr.upload.addEventListener('progress', function(ev) {
+            if (ev.lengthComputable) {
+                const pct = Math.round((ev.loaded / ev.total) * 100);
+                document.getElementById('uploadProgressBar').style.width = pct + '%';
+            }
+        });
+
+        xhr.addEventListener('load', function() {
+            if (xhr.status === 200 || xhr.status === 303 || xhr.responseURL) {
+                window.location.href = '/upload';
+            } else {
+                let msg = '上传失败';
+                try { msg = JSON.parse(xhr.responseText).error || msg; } catch(_) {}
+                showUploadError(msg);
+                btn.disabled = false;
+                btn.textContent = '上传文档';
+                progressBar.style.display = 'none';
+            }
+        });
+
+        xhr.addEventListener('error', function() {
+            showUploadError('网络错误，请检查连接后重试');
+            btn.disabled = false;
+            btn.textContent = '上传文档';
+            progressBar.style.display = 'none';
+        });
+
+        xhr.send(formData);
     });
+
+    function showUploadError(msg) {
+        let toast = document.getElementById('uploadToast');
+        if (!toast) {
+            toast = document.createElement('div');
+            toast.id = 'uploadToast';
+            toast.className = 'upload-toast';
+            document.querySelector('.page-main').insertBefore(toast, document.querySelector('.card'));
+        }
+        toast.textContent = msg;
+        toast.style.display = 'block';
+        setTimeout(() => { toast.style.display = 'none'; }, 5000);
+    }
 });
 
 function getCsrfToken() {
     const match = document.cookie.match(/csrf_token=([^;]+)/);
     return match ? match[1] : '';
+}
+
+function reprocessDocument(docId) {
+    fetch('/upload/' + docId + '/reprocess', {
+        method: 'POST',
+        headers: { 'X-CSRF-Token': getCsrfToken() }
+    }).then(r => {
+        if (r.ok) { window.location.reload(); }
+        else { r.json().then(d => alert(d.error || '重新处理失败')); }
+    }).catch(() => alert('重新处理失败'));
 }
 
 function deleteDocument(docId) {

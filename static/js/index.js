@@ -21,6 +21,7 @@ document.addEventListener('DOMContentLoaded', function() {
     let chats = [];
     let knowledgeBases = [];
     let isStreaming = false;
+    let abortController = null;
 
     // ── Init ──
     function init() {
@@ -59,6 +60,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     function renderKBSelector() {
+        if (!kbSelector) return;
         kbSelector.innerHTML = '<option value="">全部知识库</option>';
         knowledgeBases.forEach(kb => {
             const opt = document.createElement('option');
@@ -117,7 +119,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 clearChatBox();
                 data.messages.forEach(msg => addMessage(msg.role === 'user' ? 'user' : 'bot', msg.content, false));
                 updateTopbarTitle(data.title || '新对话');
-                if (data.knowledge_base_id) {
+                if (data.knowledge_base_id && kbSelector) {
                     kbSelector.value = data.knowledge_base_id;
                 }
                 scrollToBottom();
@@ -238,7 +240,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
         const contentDiv = document.createElement('div');
         contentDiv.className = 'message-content';
-        contentDiv.innerHTML = formatMessage(content);
+        contentDiv.innerHTML = formatMessage(content, role);
 
         body.appendChild(name);
         body.appendChild(contentDiv);
@@ -246,16 +248,84 @@ document.addEventListener('DOMContentLoaded', function() {
         row.appendChild(body);
         chatBox.appendChild(row);
 
+        if (role === 'bot') addCopyButton(contentDiv, content);
+
         scrollToBottom();
         return contentDiv;
     }
 
-    function formatMessage(text) {
+    function formatMessage(text, role) {
         if (!text) return '';
+        if (role === 'bot' && typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined') {
+            const rawHtml = marked.parse(text);
+            return DOMPurify.sanitize(rawHtml);
+        }
         let html = escapeHtml(text);
-        // Convert newlines to paragraphs
         html = html.split(/\n\n+/).map(p => `<p>${p.replace(/\n/g, '<br>')}</p>`).join('');
         return html;
+    }
+
+    function addCopyButton(contentDiv, rawText) {
+        let wrapper = contentDiv.parentNode.querySelector('.message-actions');
+        if (!wrapper) {
+            wrapper = document.createElement('div');
+            wrapper.className = 'message-actions';
+            contentDiv.parentNode.insertBefore(wrapper, contentDiv.nextSibling);
+        }
+        const btn = document.createElement('button');
+        btn.className = 'copy-btn';
+        btn.title = '复制';
+        btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>';
+        btn.addEventListener('click', function() {
+            navigator.clipboard.writeText(rawText).then(() => {
+                btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>';
+                btn.classList.add('copied');
+                setTimeout(() => {
+                    btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>';
+                    btn.classList.remove('copied');
+                }, 2000);
+            });
+        });
+        wrapper.appendChild(btn);
+    }
+
+    function addFeedbackButtons(contentDiv, messageId, chatId) {
+        let wrapper = contentDiv.parentNode.querySelector('.message-actions');
+        if (!wrapper) {
+            wrapper = document.createElement('div');
+            wrapper.className = 'message-actions';
+            contentDiv.parentNode.insertBefore(wrapper, contentDiv.nextSibling);
+        }
+        const upBtn = document.createElement('button');
+        upBtn.className = 'feedback-btn';
+        upBtn.title = '回答有帮助';
+        upBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 9V5a3 3 0 00-3-3l-4 9v11h11.28a2 2 0 002-1.7l1.38-9a2 2 0 00-2-2.3H14z"/><path d="M7 22H4a2 2 0 01-2-2v-7a2 2 0 012-2h3"/></svg>';
+        const downBtn = document.createElement('button');
+        downBtn.className = 'feedback-btn';
+        downBtn.title = '回答不准确';
+        downBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 15v4a3 3 0 003 3l4-9V2H5.72a2 2 0 00-2 1.7l-1.38 9a2 2 0 002 2.3H10z"/><path d="M17 2h3a2 2 0 012 2v7a2 2 0 01-2 2h-3"/></svg>';
+
+        function submitFeedback(rating) {
+            const formData = new FormData();
+            formData.append('message_id', messageId);
+            formData.append('chat_id', chatId);
+            formData.append('rating', rating);
+            fetch('/api/feedback', {
+                method: 'POST',
+                headers: { 'X-CSRF-Token': getCsrfToken() },
+                body: formData
+            }).then(r => {
+                if (r.ok) {
+                    upBtn.classList.toggle('feedback-active', rating === 'up');
+                    downBtn.classList.toggle('feedback-active', rating === 'down');
+                }
+            });
+        }
+
+        upBtn.addEventListener('click', () => submitFeedback('up'));
+        downBtn.addEventListener('click', () => submitFeedback('down'));
+        wrapper.appendChild(upBtn);
+        wrapper.appendChild(downBtn);
     }
 
     // ── Send message ──
@@ -296,12 +366,15 @@ document.addEventListener('DOMContentLoaded', function() {
 
         isStreaming = true;
         sendBtn.disabled = true;
+        showStopButton();
 
-        const kbId = kbSelector.value;
+        abortController = new AbortController();
+        const kbId = kbSelector ? kbSelector.value : '';
 
         fetch('/ask_stream', {
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            signal: abortController.signal,
             body: new URLSearchParams({
                 user_input: msg,
                 chat_id: currentChatId,
@@ -313,9 +386,14 @@ document.addEventListener('DOMContentLoaded', function() {
             handleStream(response, loadingRow);
         })
         .catch(error => {
-            console.error('发送失败:', error);
-            if (loadingRow.parentNode) loadingRow.remove();
-            addMessage('bot', '抱歉，发送消息时出现错误：' + error.message);
+            if (error.name === 'AbortError') {
+                if (loadingRow.parentNode) loadingRow.remove();
+                addMessage('bot', '（已停止生成）');
+            } else {
+                console.error('发送失败:', error);
+                if (loadingRow.parentNode) loadingRow.remove();
+                addMessage('bot', '抱歉，发送消息时出现错误：' + error.message);
+            }
             finishStreaming();
         });
     }
@@ -351,7 +429,8 @@ document.addEventListener('DOMContentLoaded', function() {
             return reader.read().then(({ done, value }) => {
                 if (done) {
                     contentDiv.classList.remove('streaming-cursor');
-                    contentDiv.innerHTML = formatMessage(accumulated);
+                    contentDiv.innerHTML = formatMessage(accumulated, 'bot');
+                    addCopyButton(contentDiv, accumulated);
                     finishStreaming();
                     return;
                 }
@@ -368,7 +447,8 @@ document.addEventListener('DOMContentLoaded', function() {
 
                     if (data === '[DONE]') {
                         contentDiv.classList.remove('streaming-cursor');
-                        contentDiv.innerHTML = formatMessage(accumulated);
+                        contentDiv.innerHTML = formatMessage(accumulated, 'bot');
+                        addCopyButton(contentDiv, accumulated);
                         finishStreaming();
                         return;
                     }
@@ -379,7 +459,9 @@ document.addEventListener('DOMContentLoaded', function() {
                             const parsed = JSON.parse(data);
                             if (parsed.done === true) {
                                 contentDiv.classList.remove('streaming-cursor');
-                                contentDiv.innerHTML = formatMessage(accumulated);
+                                contentDiv.innerHTML = formatMessage(accumulated, 'bot');
+                                addCopyButton(contentDiv, accumulated);
+                                if (parsed.message_id) addFeedbackButtons(contentDiv, parsed.message_id, parsed.chat_id);
                                 finishStreaming();
                                 return;
                             }
@@ -396,7 +478,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         }
                     }
 
-                    contentDiv.innerHTML = formatMessage(accumulated);
+                    contentDiv.innerHTML = formatMessage(accumulated, 'bot');
                     scrollToBottom();
                 }
 
@@ -405,17 +487,51 @@ document.addEventListener('DOMContentLoaded', function() {
         }
 
         read().catch(error => {
-            console.error('流式读取失败:', error);
             contentDiv.classList.remove('streaming-cursor');
-            if (!accumulated) contentDiv.innerHTML = '<p>抱歉，生成回复时出现错误。</p>';
+            if (error.name === 'AbortError') {
+                if (accumulated) {
+                    contentDiv.innerHTML = formatMessage(accumulated, 'bot');
+                    addCopyButton(contentDiv, accumulated);
+                } else {
+                    contentDiv.innerHTML = '<p>（已停止生成）</p>';
+                }
+            } else {
+                console.error('流式读取失败:', error);
+                if (!accumulated) contentDiv.innerHTML = '<p>抱歉，生成回复时出现错误。</p>';
+            }
             finishStreaming();
         });
+    }
+
+    function showStopButton() {
+        sendBtn.classList.add('hidden');
+        let stopBtn = document.getElementById('stopBtn');
+        if (!stopBtn) {
+            stopBtn = document.createElement('button');
+            stopBtn.id = 'stopBtn';
+            stopBtn.className = 'stop-btn';
+            stopBtn.title = '停止生成';
+            stopBtn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
+            sendBtn.parentNode.appendChild(stopBtn);
+        }
+        stopBtn.classList.remove('hidden');
+        stopBtn.onclick = () => {
+            if (abortController) abortController.abort();
+        };
+    }
+
+    function hideStopButton() {
+        sendBtn.classList.remove('hidden');
+        const stopBtn = document.getElementById('stopBtn');
+        if (stopBtn) stopBtn.classList.add('hidden');
     }
 
     function finishStreaming() {
         isStreaming = false;
         sendBtn.disabled = false;
-        fetchChats(); // Refresh chat list
+        abortController = null;
+        hideStopButton();
+        fetchChats();
     }
 
     function scrollToBottom() {
@@ -440,15 +556,58 @@ document.addEventListener('DOMContentLoaded', function() {
 
     newChatBtn.addEventListener('click', () => createNewChat());
 
-    kbSelector.addEventListener('change', () => {
-        if (currentChatId) {
-            fetch(`/api/chats/${currentChatId}`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': getCsrfToken() },
-                body: JSON.stringify({ knowledge_base_id: kbSelector.value || null })
-            }).catch(e => console.error('更新知识库失败:', e));
-        }
-    });
+    const exportBtn = document.getElementById('exportBtn');
+    if (exportBtn) {
+        exportBtn.addEventListener('click', () => {
+            if (!currentChatId) return;
+            window.open(`/api/chats/${currentChatId}/export`, '_blank');
+        });
+    }
+
+    // Password change modal
+    const changePwdBtn = document.getElementById('changePwdBtn');
+    const pwdModal = document.getElementById('pwdModal');
+    const pwdForm = document.getElementById('pwdForm');
+    const pwdCancel = document.getElementById('pwdCancel');
+    const pwdError = document.getElementById('pwdError');
+
+    if (changePwdBtn && pwdModal) {
+        changePwdBtn.addEventListener('click', () => {
+            pwdModal.style.display = 'flex';
+            pwdError.style.display = 'none';
+            pwdForm.reset();
+        });
+        pwdCancel.addEventListener('click', () => { pwdModal.style.display = 'none'; });
+        pwdModal.addEventListener('click', (e) => { if (e.target === pwdModal) pwdModal.style.display = 'none'; });
+        pwdForm.addEventListener('submit', (e) => {
+            e.preventDefault();
+            fetch('/api/change-password', {
+                method: 'POST',
+                headers: { 'X-CSRF-Token': getCsrfToken() },
+                body: new FormData(pwdForm)
+            }).then(r => r.json().then(d => {
+                if (r.ok) {
+                    pwdModal.style.display = 'none';
+                    alert('密码修改成功');
+                } else {
+                    pwdError.textContent = d.error || '修改失败';
+                    pwdError.style.display = 'block';
+                }
+            }));
+        });
+    }
+
+    if (kbSelector) {
+        kbSelector.addEventListener('change', () => {
+            if (currentChatId) {
+                fetch(`/api/chats/${currentChatId}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': getCsrfToken() },
+                    body: JSON.stringify({ knowledge_base_id: kbSelector.value || null })
+                }).catch(e => console.error('更新知识库失败:', e));
+            }
+        });
+    }
 
     // Close sidebar on mobile when clicking outside
     document.addEventListener('click', (e) => {

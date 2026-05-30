@@ -53,12 +53,17 @@
                     <div class="user-role">{% if user.role == 'admin' %}管理员{% elif user.role == 'expert' %}专家{% else %}用户{% endif %}</div>
                 </div>
             </div>
-            <form method="POST" action="/logout" style="display:inline">
-                <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
-                <button type="submit" class="btn btn-ghost btn-sm" title="退出登录">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+            <div class="sidebar-footer-actions">
+                <button type="button" class="btn btn-ghost btn-sm" id="changePwdBtn" title="修改密码">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
                 </button>
-            </form>
+                <form method="POST" action="/logout" style="display:inline">
+                    <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
+                    <button type="submit" class="btn btn-ghost btn-sm" title="退出登录">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+                    </button>
+                </form>
+            </div>
         </div>
     </aside>
 
@@ -71,9 +76,14 @@
             </button>
             <div class="topbar-title" id="chatTitle">新对话</div>
             <div class="topbar-actions">
+                <button type="button" class="topbar-btn" id="exportBtn" title="导出对话">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                </button>
+                {% if user.role in ['expert', 'admin'] %}
                 <select class="kb-select" id="kbSelector" title="选择知识库">
                     <option value="">全部知识库</option>
                 </select>
+                {% endif %}
             </div>
         </div>
 
@@ -105,6 +115,29 @@
             <div class="input-hint">Enter 发送，Shift + Enter 换行</div>
         </div>
     </main>
+</div>
+
+<!-- Password change modal -->
+<div id="pwdModal" class="modal-overlay" style="display:none">
+    <div class="modal-box">
+        <h3>修改密码</h3>
+        <form id="pwdForm">
+            <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
+            <div class="form-group">
+                <label class="form-label">当前密码</label>
+                <input type="password" name="old_password" class="form-input" required>
+            </div>
+            <div class="form-group">
+                <label class="form-label">新密码</label>
+                <input type="password" name="new_password" class="form-input" required minlength="8" placeholder="至少8位，包含字母和数字">
+            </div>
+            <div id="pwdError" class="pwd-error" style="display:none"></div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-ghost" id="pwdCancel">取消</button>
+                <button type="submit" class="btn btn-primary">确认修改</button>
+            </div>
+        </form>
+    </div>
 </div>
 
 <script src="/static/js/index.js"></script>

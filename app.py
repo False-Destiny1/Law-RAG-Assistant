@@ -293,7 +293,18 @@ class UploadedDocument(Base):
     file_path = Column(String(512), nullable=False)
     file_type = Column(String(50), nullable=False)
     file_size = Column(Integer, nullable=False)
+    status = Column(String(20), nullable=False, default="pending")  # pending/processing/completed/failed
     uploaded_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class MessageFeedback(Base):
+    __tablename__ = "message_feedback"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("user.id"), nullable=False)
+    message_id = Column(Integer, nullable=False)
+    chat_id = Column(Integer, nullable=False)
+    rating = Column(String(10), nullable=False)  # 'up' or 'down'
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
 Base.metadata.create_all(engine)
@@ -304,6 +315,7 @@ _index_sqls = [
     "CREATE INDEX IF NOT EXISTS ix_message_chat ON message (chat_id)",
     "CREATE INDEX IF NOT EXISTS ix_kb_user ON knowledge_base (user_id)",
     "CREATE INDEX IF NOT EXISTS ix_doc_user_kb ON uploaded_document (user_id, knowledge_base_id)",
+    "ALTER TABLE uploaded_document ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'completed'",
 ]
 with engine.connect() as _conn:
     for _sql in _index_sqls:
@@ -601,6 +613,24 @@ def logout(request: Request):
     return response
 
 
+@app.post("/api/change-password")
+def change_password(
+    old_password: str = Form(...),
+    new_password: str = Form(...),
+    user: User = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    if not user.check_password(old_password):
+        return JSONResponse({"error": "当前密码错误"}, status_code=400)
+    if len(new_password) < 8:
+        return JSONResponse({"error": "新密码长度不能少于8位"}, status_code=400)
+    if not re.search(r"[a-zA-Z]", new_password) or not re.search(r"\d", new_password):
+        return JSONResponse({"error": "新密码必须包含字母和数字"}, status_code=400)
+    user.set_password(new_password)
+    db.commit()
+    return {"success": True, "message": "密码修改成功"}
+
+
 # ── Page routes ──────────────────────────────────────────────────────
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request, user: User = Depends(require_user)):
@@ -709,14 +739,37 @@ def upload_page(request: Request, user: User = Depends(require_user), db: Sessio
 
 
 def _process_document_async(file_path: str, doc_id: int, knowledge_base_id: int = None):
-    """后台异步处理文档索引"""
+    """后台异步处理文档索引（FAISS + BM25 + 知识图谱）"""
+    db = SessionLocal()
     try:
+        doc = db.query(UploadedDocument).filter(UploadedDocument.id == doc_id).first()
+        if doc:
+            doc.status = "processing"
+            db.commit()
         logger.info(f"[异步] 开始处理文档索引: {file_path}")
         rag_model.add_file_documents(file_path)
+        # 将文档内容写入知识图谱
+        try:
+            from law_assistant.processor import DocumentProcessor
+            content = DocumentProcessor()._load_file_content(file_path)
+            if content and rag_model.knowledge_graph.is_available:
+                rag_model.knowledge_graph.build_from_text(content)
+                logger.info(f"[异步] 知识图谱更新完成: {file_path}")
+        except Exception as ge:
+            logger.warning(f"[异步] 知识图谱更新失败（不影响主流程）: {ge}")
         rag_model.invalidate_kb_cache(knowledge_base_id)
+        if doc:
+            doc.status = "completed"
+            db.commit()
         logger.info(f"[异步] 文档索引完成: {file_path}")
     except Exception as e:
         logger.error(f"[异步] 文档索引失败: {file_path}, 错误: {e}")
+        doc = db.query(UploadedDocument).filter(UploadedDocument.id == doc_id).first()
+        if doc:
+            doc.status = "failed"
+            db.commit()
+    finally:
+        db.close()
 
 
 @app.post("/upload")
@@ -733,10 +786,11 @@ async def upload_submit(
 
     allowed_extensions = {"pdf", "docx", "txt", "jpg", "jpeg", "png", "bmp", "tiff"}
     if not file.filename:
-        return RedirectResponse(url="/upload", status_code=303)
+        return JSONResponse({"error": "请选择文件"}, status_code=400)
     file_ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
     if file_ext not in allowed_extensions:
-        return RedirectResponse(url="/upload", status_code=303)
+        supported = ", ".join(sorted(allowed_extensions))
+        return JSONResponse({"error": f"不支持的文件格式: .{file_ext}，支持: {supported}"}, status_code=400)
 
     filename = f"{uuid.uuid4()}.{file_ext}"
     file_path = os.path.join(UPLOAD_FOLDER, filename)
@@ -795,6 +849,26 @@ def delete_document(
     db.delete(doc)
     db.commit()
     return JSONResponse({"success": True})
+
+
+@app.post("/upload/{doc_id}/reprocess")
+def reprocess_document(
+    doc_id: int,
+    background_tasks: BackgroundTasks,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    if user.role not in ["expert", "admin"]:
+        return JSONResponse({"error": "权限不足"}, status_code=403)
+    doc = db.query(UploadedDocument).filter(UploadedDocument.id == doc_id, UploadedDocument.user_id == user.id).first()
+    if not doc:
+        return JSONResponse({"error": "文档不存在"}, status_code=404)
+    if not os.path.exists(doc.file_path):
+        return JSONResponse({"error": "文件已丢失，无法重新处理"}, status_code=404)
+    doc.status = "pending"
+    db.commit()
+    background_tasks.add_task(_process_document_async, doc.file_path, doc.id, doc.knowledge_base_id)
+    return JSONResponse({"success": True, "status": "pending"})
 
 
 def _remove_document_from_texts(texts: list[str], kb_id: int, filename: str):
@@ -903,6 +977,26 @@ def delete_chat(chat_id: int, user: User = Depends(require_user), db: Session = 
     return {"success": True}
 
 
+@app.get("/api/chats/{chat_id}/export")
+def export_chat(chat_id: int, user: User = Depends(require_user), db: Session = Depends(get_db)):
+    chat = db.query(Chat).filter(Chat.id == chat_id, Chat.user_id == user.id).first()
+    if not chat:
+        return JSONResponse({"error": "对话不存在"}, status_code=404)
+    messages = db.query(Message).filter(Message.chat_id == chat_id).order_by(Message.created_at.asc()).all()
+    lines = [f"# {chat.title or '对话记录'}\n"]
+    lines.append(f"导出时间: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n\n---\n")
+    for msg in messages:
+        role = "用户" if msg.role == "user" else "法律助手"
+        ts = msg.created_at.strftime("%Y-%m-%d %H:%M") if msg.created_at else ""
+        lines.append(f"**{role}** ({ts})\n\n{msg.content}\n\n---\n")
+    content = "\n".join(lines)
+    return StreamingResponse(
+        iter([content]),
+        media_type="text/markdown",
+        headers={"Content-Disposition": f"attachment; filename=chat_{chat_id}.md"},
+    )
+
+
 @app.post("/api/chats/{chat_id}/clear_memory")
 def clear_chat_memory(chat_id: int, user: User = Depends(require_user), db: Session = Depends(get_db)):
     chat = db.query(Chat).filter(Chat.id == chat_id, Chat.user_id == user.id).first()
@@ -941,6 +1035,27 @@ def set_retrieval_weights(
     rag_model.bm25_weight = bm25_weight
     rag_model.graph_weight = graph_weight
     return {"vector_weight": vector_weight, "bm25_weight": bm25_weight, "graph_weight": graph_weight}
+
+
+@app.post("/api/feedback")
+def submit_feedback(
+    message_id: int = Form(...),
+    chat_id: int = Form(...),
+    rating: str = Form(...),
+    user: User = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    if rating not in ("up", "down"):
+        return JSONResponse({"error": "rating 必须为 up 或 down"}, status_code=400)
+    existing = db.query(MessageFeedback).filter(
+        MessageFeedback.user_id == user.id, MessageFeedback.message_id == message_id
+    ).first()
+    if existing:
+        existing.rating = rating
+    else:
+        db.add(MessageFeedback(user_id=user.id, message_id=message_id, chat_id=chat_id, rating=rating))
+    db.commit()
+    return {"success": True, "rating": rating}
 
 
 # ── Streaming chat ──────────────────────────────────────────────────
@@ -1006,6 +1121,7 @@ async def ask_stream(request: Request, user: User = Depends(require_user), db: S
 
             rag_model.save_bot_response(conversation_id, full_response)
 
+            bot_msg_id = None
             db2 = SessionLocal()
             try:
                 bot_msg = Message(chat_id=int(chat_id), role="bot", content=full_response)
@@ -1014,10 +1130,12 @@ async def ask_stream(request: Request, user: User = Depends(require_user), db: S
                 if chat:
                     chat.updated_at = datetime.now(timezone.utc)
                 db2.commit()
+                db2.refresh(bot_msg)
+                bot_msg_id = bot_msg.id
             finally:
                 db2.close()
 
-            yield 'data: {"done": true}\n\n'
+            yield f'data: {{"done": true, "message_id": {bot_msg_id}, "chat_id": {chat_id}}}\n\n'
         except Exception as e:
             logger.error(f"生成回复时出现错误: {e}", exc_info=True)
             error_msg = "抱歉，生成回复时出现错误，请稍后重试"
