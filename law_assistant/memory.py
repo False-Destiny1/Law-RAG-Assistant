@@ -55,42 +55,8 @@ class ConversationMemory:
             result.append(item)
         return result
 
-    def _try_summarize(self, conversation_id: str):
-        """当对话历史超过阈值时，用 LLM 摘要压缩早期消息"""
-        conversation = self.conversations.get(conversation_id)
-        if not conversation or not self._summarizer:
-            return
-        history = conversation["history"]
-        if len(history) <= SUMMARIZE_THRESHOLD:
-            return
-        # 取前半部分做摘要，保留后半部分作为近期上下文
-        split_at = len(history) // 2
-        # 确保保留偶数条消息（完整的用户-助手对）
-        if split_at % 2 != 0:
-            split_at += 1
-        old_messages = history[:split_at]
-        recent_messages = history[split_at:]
-        try:
-            new_summary = self._summarizer(old_messages)
-            existing_summary = conversation.get("summary", "")
-            if existing_summary:
-                combined = existing_summary + "\n" + new_summary
-            else:
-                combined = new_summary
-            # 控制摘要长度
-            if len(combined) > SUMMARY_MAX_TOKENS * 2:
-                combined = combined[-(SUMMARY_MAX_TOKENS * 2):]
-            conversation["summary"] = combined
-            conversation["history"] = recent_messages
-            logger.info(
-                f"对话 {conversation_id} 摘要压缩: {len(old_messages)} 条消息 → 摘要, "
-                f"保留 {len(recent_messages)} 条近期消息"
-            )
-        except Exception as e:
-            logger.warning(f"对话摘要生成失败: {e}")
-
     def _write_to_redis(self, conversation_id: str):
-        """将当前对话数据写入 Redis（调用前需已持有 self._lock 或数据已就绪）"""
+        """将当前对话数据写入 Redis（在锁外调用，依赖 GIL 保证 dict 读取一致性）"""
         try:
             from law_assistant.redis_utils import cache_set_json
 
@@ -107,6 +73,9 @@ class ConversationMemory:
 
     def add_message(self, conversation_id: str, role: str, content: str):
         """添加消息到对话历史（内存缓存 + LRU 淘汰 + 自动摘要，线程安全）"""
+        # Phase 1: 锁内执行内存操作
+        need_summarize = False
+        split_at = 0
         with self._lock:
             if conversation_id not in self.conversations:
                 # LRU 淘汰：超过上限时移除最旧的对话
@@ -120,16 +89,44 @@ class ConversationMemory:
             conversation = self.conversations[conversation_id]
             conversation["history"].append({"role": role, "content": content, "timestamp": datetime.now()})
 
-            # 尝试摘要压缩（超过阈值时自动触发）
-            self._try_summarize(conversation_id)
+            # 检查是否需要摘要压缩（不在锁内执行 LLM 调用）
+            if len(conversation["history"]) > SUMMARIZE_THRESHOLD and self._summarizer:
+                split_at = len(conversation["history"]) // 2
+                if split_at % 2 != 0:
+                    split_at += 1
+                # 只快照旧消息，不裁剪 history（裁剪推迟到摘要成功后）
+                need_summarize = True
 
-            # 保留最近N轮对话（摘要压缩后通常不会触发，作为兜底）
+            # 保留最近N轮对话（兜底）
             max_messages = self.max_history_turns * 2
             if len(conversation["history"]) > max_messages:
                 conversation["history"] = conversation["history"][-max_messages:]
 
-            # Write-through to Redis（锁内执行，避免与 clear_conversation 的 TOCTOU 竞态）
-            self._write_to_redis(conversation_id)
+        # Phase 2: 锁外执行网络/LLM 操作
+        if need_summarize:
+            # 锁外快照旧消息（conversation 仍在内存中，GIL 保证引用有效）
+            old_messages = list(self.conversations.get(conversation_id, {}).get("history", [])[:split_at])
+            if not old_messages:
+                self._write_to_redis(conversation_id)
+                return
+            try:
+                new_summary = self._summarizer(old_messages)
+                # 锁内写回摘要 + 裁剪 history（重新读取 existing_summary 避免并发覆盖）
+                with self._lock:
+                    if conversation_id in self.conversations:
+                        existing = self.conversations[conversation_id].get("summary", "")
+                        combined = (existing + "\n" + new_summary) if existing else new_summary
+                        if len(combined) > SUMMARY_MAX_TOKENS * 2:
+                            combined = combined[-(SUMMARY_MAX_TOKENS * 2):]
+                        self.conversations[conversation_id]["summary"] = combined
+                        # 摘要成功，才裁剪旧消息
+                        self.conversations[conversation_id]["history"] = \
+                            self.conversations[conversation_id]["history"][split_at:]
+                logger.info(f"对话 {conversation_id} 摘要压缩: {len(old_messages)} 条消息 → 摘要")
+            except Exception as e:
+                logger.warning(f"对话摘要失败，保留完整历史: {e}")
+
+        self._write_to_redis(conversation_id)
 
     def get_recent_history(self, conversation_id: str) -> list[dict]:
         """获取最近的对话历史（优先内存 → Redis → DB）"""
@@ -226,14 +223,10 @@ class ConversationMemory:
                 self.conversations[conversation_id] = {"history": history, "created_at": datetime.now()}
                 self._write_to_redis(conversation_id)
 
-            import logging
-
-            logging.getLogger(__name__).info(f"从DB加载对话历史: {conversation_id}, {len(history)} 条消息")
+            logger.info(f"从DB加载对话历史: {conversation_id}, {len(history)} 条消息")
             return history
         except Exception as e:
-            import logging
-
-            logging.getLogger(__name__).warning(f"从DB加载对话历史失败: {e}")
+            logger.warning(f"从DB加载对话历史失败: {e}")
             return []
         finally:
             if db:

@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import threading
+from collections import OrderedDict
 
 import numpy as np
 import yaml
@@ -28,6 +29,15 @@ load_dotenv()
 # Shared thread pool for concurrent retrieval (avoids creating a new pool per query)
 _SHARED_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=8)
 atexit.register(_SHARED_EXECUTOR.shutdown, wait=False)
+
+
+def _cuda_available() -> bool:
+    """检测 CUDA 是否可用"""
+    try:
+        import torch
+        return torch.cuda.is_available()
+    except ImportError:
+        return False
 
 
 class DeepSeekApiRag:
@@ -71,15 +81,11 @@ class DeepSeekApiRag:
                 if os.path.isdir(local_path):
                     model_path = local_path
             # 自动检测 CUDA 可用性
-            device = "cuda"
-            try:
-                import torch
-                if not torch.cuda.is_available():
-                    device = "cpu"
-                    logger.warning("CUDA 不可用，回退到 CPU 模式（推理速度会较慢）")
-            except ImportError:
+            if _cuda_available():
+                device = "cuda"
+            else:
                 device = "cpu"
-                logger.warning("PyTorch 未安装或无 CUDA 支持，使用 CPU 模式")
+                logger.warning("CUDA 不可用，回退到 CPU 模式（推理速度会较慢）")
             logger.info(f"使用本地嵌入模型: {model_path} (device={device})")
             self.embedding_model = HuggingFaceEmbeddings(
                 model_name=model_path, model_kwargs={"device": device}, encode_kwargs={"normalize_embeddings": True}
@@ -119,10 +125,23 @@ class DeepSeekApiRag:
         self.document_processor = DocumentProcessor()
         self.general_splitter = GeneralDocumentSplitter(chunk_size=200, chunk_overlap=20)
 
-        # 6. 初始化Reranker配置
-        self.reranker_api_key = os.getenv("RERANKER_API_KEY")
-        self.reranker_url = os.getenv("RERANKER_BASE_URL", "https://api.siliconflow.cn/v1/rerank")
-        self.reranker_model = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
+        # 6. 初始化Reranker配置（默认使用本地模型）
+        reranker_provider = os.getenv("RERANKER_PROVIDER", "local").lower()
+        self._reranker_provider = reranker_provider
+        self._local_reranker = None
+        self.reranker_api_key = None
+
+        if reranker_provider == "local":
+            from sentence_transformers import CrossEncoder
+            reranker_model_path = os.getenv("RERANKER_MODEL_PATH", "BAAI/bge-reranker-v2-m3")
+            device = "cuda" if _cuda_available() else "cpu"
+            self._local_reranker = CrossEncoder(reranker_model_path, max_length=512, device=device)
+            logger.info(f"使用本地 Reranker: {reranker_model_path} (device={device})")
+        else:
+            self.reranker_api_key = os.getenv("RERANKER_API_KEY")
+            self.reranker_url = os.getenv("RERANKER_BASE_URL", "https://api.siliconflow.cn/v1/rerank")
+            self.reranker_model = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
+            logger.info(f"使用 DashScope Reranker: {self.reranker_model}")
 
         # 7. 初始化记忆模块
         self.memory = ConversationMemory(max_history_turns=5)
@@ -149,11 +168,13 @@ class DeepSeekApiRag:
         self._prompts_cache = self._load_all_prompts()
 
         # 11. 知识库文档文本缓存（首次访问时填充，文档增删时失效）
-        self._kb_texts_cache: dict = {}  # kb_id -> set of texts
+        self._kb_texts_cache: OrderedDict = OrderedDict()  # kb_id -> set of texts
         self._KB_CACHE_MAX_SIZE = 50  # 最多缓存 50 个知识库
+        self._cache_lock = threading.Lock()
 
         # 12. FAISS 写操作锁（保护并发写入安全）
         self._faiss_write_lock = threading.Lock()
+        self._faiss_dirty = False
 
         # 如果向量数据库已存在，直接加载
         if os.path.exists(db_path):
@@ -208,6 +229,23 @@ class DeepSeekApiRag:
                 return list(zip(documents[:top_k], original_scores[:top_k], strict=False))
             return [(doc, 0.0) for doc in documents[:top_k]]
 
+        if not documents:
+            return []
+
+        # 本地 CrossEncoder Reranker
+        if self._reranker_provider == "local" and self._local_reranker:
+            try:
+                pairs = [[query, doc] for doc in documents[:20]]
+                scores = self._local_reranker.predict(pairs)
+                scored = list(zip(documents[:20], scores))
+                scored.sort(key=lambda x: x[1], reverse=True)
+                logger.info(f"本地 Reranker 返回 {len(scored)} 个结果")
+                return [(doc, float(score)) for doc, score in scored[:top_k]]
+            except Exception as e:
+                logger.warning(f"本地 Reranker 调用失败: {e}")
+                return _fallback()
+
+        # DashScope API Reranker
         if not self.reranker_api_key:
             logger.warning("未设置 Reranker API 密钥，跳过重排序")
             return _fallback()
@@ -490,13 +528,17 @@ class DeepSeekApiRag:
         actual = self._compute_faiss_hash()
         return expected == actual
 
+    def _save_vector_db_unlocked(self):
+        """内部方法：保存向量数据库（假设已持有 _faiss_write_lock）"""
+        if self.vector_db is not None:
+            self.vector_db.save_local(self.db_path)
+            self._save_faiss_hash()
+            logger.info(f"向量数据库已保存到: {self.db_path}")
+
     def save_vector_db(self):
         """保存向量数据库到本地（附带完整性哈希）"""
         with self._faiss_write_lock:
-            if self.vector_db is not None:
-                self.vector_db.save_local(self.db_path)
-                self._save_faiss_hash()
-                logger.info(f"向量数据库已保存到: {self.db_path}")
+            self._save_vector_db_unlocked()
 
     def load_vector_db(self):
         """从本地加载向量数据库（先校验文件完整性）"""
@@ -614,6 +656,9 @@ class DeepSeekApiRag:
         db_session=None,
     ) -> list[tuple[str, float]]:
         """混合检索 + 多子查询并行 + HyDE + 重排序 + 相关性过滤"""
+        # 惰性重建 FAISS 索引（文档删除后标记 dirty）
+        self.rebuild_faiss_if_dirty()
+
         # 尝试检索缓存（仅对简单查询生效，有子查询时跳过）
         if not sub_queries and not hypothetical_doc:
             try:
@@ -698,22 +743,25 @@ class DeepSeekApiRag:
 
     def _get_knowledge_base_texts(self, knowledge_base_id: int, db_session) -> set:
         """获取指定知识库中所有文档的文本块（L1 内存 + L2 Redis + L3 重建）"""
-        # L1: 内存缓存
-        if knowledge_base_id in self._kb_texts_cache:
-            return self._kb_texts_cache[knowledge_base_id]
+        # L1: 内存缓存（锁内操作）
+        with self._cache_lock:
+            if knowledge_base_id in self._kb_texts_cache:
+                self._kb_texts_cache.move_to_end(knowledge_base_id)
+                return self._kb_texts_cache[knowledge_base_id]
 
-        # L2: Redis
+        # L2: Redis（锁外，网络 I/O）
         try:
             from law_assistant.redis_utils import cache_get_set
 
             cached = cache_get_set(f"kb_texts:{knowledge_base_id}")
             if cached is not None:
-                self._kb_texts_cache[knowledge_base_id] = cached
+                with self._cache_lock:
+                    self._kb_texts_cache[knowledge_base_id] = cached
                 return cached
         except Exception as e:
             logger.warning(f"Redis 缓存读取失败 (kb_texts:{knowledge_base_id}): {e}")
 
-        # L3: 从 DB + 文件重建
+        # L3: 从 DB + 文件重建（锁外，CPU/IO 密集）
         try:
             if not self._knowledge_base_model:
                 logger.warning("知识库模型未注入，无法从 DB 重建缓存")
@@ -740,15 +788,14 @@ class DeepSeekApiRag:
                                 texts.add(full_text)
                     except Exception as e:
                         logger.warning(f"知识库文档处理失败 {path}: {e}")
-            # LRU 淘汰：缓存满时移除最早写入的条目
-            if len(self._kb_texts_cache) >= self._KB_CACHE_MAX_SIZE:
-                try:
-                    evict_key = next(iter(self._kb_texts_cache))
-                    del self._kb_texts_cache[evict_key]
-                    logger.debug(f"缓存淘汰知识库 {evict_key}")
-                except (StopIteration, RuntimeError):
-                    pass
-            self._kb_texts_cache[knowledge_base_id] = texts
+            # 锁内写回缓存（LRU 淘汰 + 插入）
+            with self._cache_lock:
+                if len(self._kb_texts_cache) >= self._KB_CACHE_MAX_SIZE:
+                    try:
+                        self._kb_texts_cache.popitem(last=False)
+                    except (StopIteration, RuntimeError):
+                        pass
+                self._kb_texts_cache[knowledge_base_id] = texts
             # Write-through to Redis
             try:
                 from law_assistant.redis_utils import cache_set_set
@@ -772,28 +819,71 @@ class DeepSeekApiRag:
         self.memory._message_model = message_model
 
     def invalidate_kb_cache(self, knowledge_base_id: int = None):
-        """文档增删后调用，清除缓存（内存 + Redis）"""
+        """文档增删后调用，清除缓存（内存 + Redis + 检索缓存）"""
         if knowledge_base_id is None:
-            self._kb_texts_cache.clear()
+            with self._cache_lock:
+                self._kb_texts_cache.clear()
             try:
                 from law_assistant.redis_utils import cache_delete_pattern
 
                 cache_delete_pattern("kb_texts:*")
+                cache_delete_pattern("retrieval_cache:*")
             except Exception as e:
-                logger.warning(f"Redis 缓存清除失败 (kb_texts:*): {e}")
+                logger.warning(f"Redis 缓存清除失败: {e}")
         else:
-            self._kb_texts_cache.pop(knowledge_base_id, None)
+            with self._cache_lock:
+                self._kb_texts_cache.pop(knowledge_base_id, None)
             try:
-                from law_assistant.redis_utils import cache_delete
+                from law_assistant.redis_utils import cache_delete, cache_delete_pattern
 
                 cache_delete(f"kb_texts:{knowledge_base_id}")
+                cache_delete_pattern("retrieval_cache:*")
             except Exception as e:
-                logger.warning(f"Redis 缓存清除失败 (kb_texts:{knowledge_base_id}): {e}")
+                logger.warning(f"Redis 缓存清除失败: {e}")
+
+    def mark_dirty(self):
+        """标记 FAISS 索引需要重建（文档删除后调用）"""
+        self._faiss_dirty = True
+        logger.info("FAISS 索引已标记为需要重建")
+
+    def rebuild_faiss_if_dirty(self):
+        """惰性重建 FAISS 索引（仅在标记为 dirty 且有文档时重建）"""
+        if not self._faiss_dirty:
+            return
+        if self.vector_db is None and self.bm25_retriever.get_document_count() == 0:
+            self._faiss_dirty = False
+            return
+        # Double-check under lock
+        with self._faiss_write_lock:
+            if not self._faiss_dirty:
+                return
+
+        # Compute embedding OUTSIDE the lock (may take seconds)
+        docs = self.bm25_retriever.documents
+        if not docs:
+            with self._faiss_write_lock:
+                self.vector_db = None
+                self._faiss_dirty = False
+            logger.info("FAISS 索引已清空（无文档）")
+            return
+
+        logger.info(f"开始惰性重建 FAISS 索引（{len(docs)} 个文档）...")
+        try:
+            from langchain_community.vectorstores.faiss import FAISS
+            new_db = FAISS.from_texts(docs, self.embedding_model, metadatas=[{"source": "bm25_rebuild"} for _ in docs])
+            # Atomic swap + save under lock
+            with self._faiss_write_lock:
+                self.vector_db = new_db
+                self._save_vector_db_unlocked()
+                self._faiss_dirty = False
+            logger.info(f"FAISS 索引重建完成，共 {len(docs)} 个文档")
+        except Exception as e:
+            logger.error(f"FAISS 索引重建失败: {e}")
 
     @staticmethod
     def _estimate_tokens(text: str) -> int:
         """粗略估算中文文本的 token 数（约 1.5 字符/token）"""
-        return max(1, len(text) // 2)
+        return max(1, len(text) * 2 // 3)
 
     def generate_response_stream(
         self,

@@ -354,16 +354,7 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User | 
     try:
         parts = token.split(":")
         if len(parts) != 4:
-            # Backward compat: accept old 3-part tokens (no timestamp)
-            if len(parts) == 3:
-                user_id_str, nonce, sig = parts
-                expected = hmac.new(
-                    SESSION_SECRET.encode(), f"{user_id_str}:{nonce}".encode(), hashlib.sha256
-                ).hexdigest()[:32]
-                if not hmac.compare_digest(sig, expected):
-                    return None
-            else:
-                return None
+            return None
         else:
             user_id_str, nonce, timestamp_str, sig = parts
             expected = hmac.new(
@@ -717,6 +708,7 @@ def delete_kb(
     if all_texts:
         background_tasks.add_task(_remove_document_from_texts, all_texts, kb_id, f"知识库#{kb_id}")
     rag_model.invalidate_kb_cache(kb_id)
+    rag_model.mark_dirty()
     db.delete(kb)
     db.commit()
     return JSONResponse({"success": True})
@@ -795,9 +787,18 @@ async def upload_submit(
     filename = f"{uuid.uuid4()}.{file_ext}"
     file_path = os.path.join(UPLOAD_FOLDER, filename)
     MAX_UPLOAD_SIZE = 20 * 1024 * 1024  # 20MB
-    content = await file.read()
-    if len(content) > MAX_UPLOAD_SIZE:
-        return JSONResponse({"error": "文件大小超过20MB限制"}, status_code=413)
+    # Chunked reading to check size without buffering entire file in memory
+    chunks = []
+    total_size = 0
+    while True:
+        chunk = await file.read(8192)
+        if not chunk:
+            break
+        total_size += len(chunk)
+        if total_size > MAX_UPLOAD_SIZE:
+            return JSONResponse({"error": "文件大小超过20MB限制"}, status_code=413)
+        chunks.append(chunk)
+    content = b"".join(chunks)
     with open(file_path, "wb") as f:
         f.write(content)
 
@@ -846,6 +847,7 @@ def delete_document(
     # 后台清理 BM25 索引
     if texts_to_remove:
         background_tasks.add_task(_remove_document_from_texts, texts_to_remove, kb_id, filename)
+    rag_model.mark_dirty()
     db.delete(doc)
     db.commit()
     return JSONResponse({"success": True})
@@ -938,7 +940,7 @@ def create_chat(user: User = Depends(require_user), db: Session = Depends(get_db
     db.commit()
     db.refresh(new_chat)
 
-    return {"id": new_chat.id, "title": new_chat.title, "created_at": new_chat.created_at.isoformat()}
+    return {"id": new_chat.id, "title": new_chat.title, "created_at": new_chat.created_at.isoformat(), "updated_at": new_chat.updated_at.isoformat() if new_chat.updated_at else new_chat.created_at.isoformat()}
 
 
 @app.put("/api/chats/{chat_id}")
@@ -963,7 +965,7 @@ async def update_chat(
     chat.updated_at = datetime.now(timezone.utc)
     db.commit()
 
-    return {"id": chat.id, "title": chat.title, "knowledge_base_id": chat.knowledge_base_id}
+    return {"id": chat.id, "title": chat.title, "knowledge_base_id": chat.knowledge_base_id, "updated_at": chat.updated_at.isoformat() if chat.updated_at else None}
 
 
 @app.delete("/api/chats/{chat_id}")
@@ -984,6 +986,8 @@ def export_chat(chat_id: int, user: User = Depends(require_user), db: Session = 
         return JSONResponse({"error": "对话不存在"}, status_code=404)
     messages = db.query(Message).filter(Message.chat_id == chat_id).order_by(Message.created_at.asc()).all()
     lines = [f"# {chat.title or '对话记录'}\n"]
+    kb_name = chat.knowledge_base.name if chat.knowledge_base else "未指定"
+    lines.append(f"知识库: {kb_name}\n")
     lines.append(f"导出时间: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n\n---\n")
     for msg in messages:
         role = "用户" if msg.role == "user" else "法律助手"
@@ -1103,12 +1107,14 @@ async def ask_stream(request: Request, user: User = Depends(require_user), db: S
         user_input, conversation_id=conversation_id, knowledge_base_id=kb_id_int, db_session=db
     )
 
-    # Save user message
+    # Save user message and update chat timestamp
     try:
         msg = Message(chat_id=int(chat_id), role="user", content=user_input)
         db.add(msg)
+        chat_obj.updated_at = datetime.now(timezone.utc)
         db.commit()
-    except Exception:
+    except Exception as e:
+        logger.error(f"保存用户消息失败: {e}")
         db.rollback()
 
     def generate():
@@ -1140,8 +1146,23 @@ async def ask_stream(request: Request, user: User = Depends(require_user), db: S
             logger.error(f"生成回复时出现错误: {e}", exc_info=True)
             error_msg = "抱歉，生成回复时出现错误，请稍后重试"
             rag_model.save_bot_response(conversation_id, error_msg)
-            yield f"data: {_json.dumps({'error': error_msg}, ensure_ascii=False)}\n\n"
-            yield 'data: {"done": true}\n\n'
+            # Persist error message to DB so it survives page refresh
+            db_err = SessionLocal()
+            try:
+                bot_msg = Message(chat_id=int(chat_id), role="bot", content=error_msg)
+                db_err.add(bot_msg)
+                chat = db_err.get(Chat, int(chat_id))
+                if chat:
+                    chat.updated_at = datetime.now(timezone.utc)
+                db_err.commit()
+                db_err.refresh(bot_msg)
+                yield f'data: {{"done": true, "message_id": {bot_msg.id}, "chat_id": {chat_id}}}\n\n'
+            except Exception:
+                db_err.rollback()
+                yield f"data: {_json.dumps({'error': error_msg}, ensure_ascii=False)}\n\n"
+                yield 'data: {"done": true}\n\n'
+            finally:
+                db_err.close()
 
     return StreamingResponse(
         generate(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}

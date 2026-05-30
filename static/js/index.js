@@ -345,9 +345,12 @@ document.addEventListener('DOMContentLoaded', function() {
 
         addMessage('user', msg);
 
-        // Update title with first message
-        const title = msg.substring(0, 20) + (msg.length > 20 ? '...' : '');
-        updateChatTitle(currentChatId, title);
+        // Only auto-set title on first message (when still default "新对话")
+        const currentChat = chats.find(c => c.id === currentChatId);
+        if (currentChat && (!currentChat.title || currentChat.title === '新对话')) {
+            const title = msg.substring(0, 20) + (msg.length > 20 ? '...' : '');
+            updateChatTitle(currentChatId, title);
+        }
 
         // Show loading
         const loadingRow = document.createElement('div');
@@ -403,6 +406,7 @@ document.addEventListener('DOMContentLoaded', function() {
         const decoder = new TextDecoder();
         let accumulated = '';
         let buffer = '';  // Buffer for incomplete lines across chunks
+        let jsonRetryCount = 0;  // Track retries for incomplete JSON
 
         // Remove loading, create streaming message
         if (loadingRow.parentNode) loadingRow.remove();
@@ -456,6 +460,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     // Parse JSON for done signal (precise check)
                     if (data.startsWith('{')) {
                         try {
+                            jsonRetryCount = 0;  // Reset on successful parse
                             const parsed = JSON.parse(data);
                             if (parsed.done === true) {
                                 contentDiv.classList.remove('streaming-cursor');
@@ -473,12 +478,20 @@ document.addEventListener('DOMContentLoaded', function() {
                                 accumulated += parsed.content;
                             }
                         } catch (e) {
-                            // Incomplete JSON, skip
-                            continue;
+                            // Incomplete JSON (possibly split across chunks), put back in buffer
+                            jsonRetryCount++;
+                            if (jsonRetryCount > 3) {
+                                console.warn('Skipping malformed SSE line after 3 retries');
+                                jsonRetryCount = 0;
+                            } else {
+                                buffer = line + '\n' + buffer;
+                                break;
+                            }
                         }
                     }
 
-                    contentDiv.innerHTML = formatMessage(accumulated, 'bot');
+                    // Lightweight rendering during streaming (newlines only, no Markdown parse)
+                    contentDiv.innerHTML = escapeHtml(accumulated).replace(/\n/g, '<br>');
                     scrollToBottom();
                 }
 
@@ -531,7 +544,12 @@ document.addEventListener('DOMContentLoaded', function() {
         sendBtn.disabled = false;
         abortController = null;
         hideStopButton();
-        fetchChats();
+        // Update current chat timestamp locally instead of re-fetching all chats
+        const currentChat = chats.find(c => c.id === currentChatId);
+        if (currentChat) {
+            currentChat.updated_at = new Date().toISOString();
+            renderChatList();
+        }
     }
 
     function scrollToBottom() {
@@ -539,9 +557,12 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     function escapeHtml(text) {
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
+        return text
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#039;');
     }
 
     // ── Event listeners ──
@@ -588,7 +609,8 @@ document.addEventListener('DOMContentLoaded', function() {
             }).then(r => r.json().then(d => {
                 if (r.ok) {
                     pwdModal.style.display = 'none';
-                    alert('密码修改成功');
+                    alert('密码修改成功，请重新登录');
+                    window.location.href = '/login';
                 } else {
                     pwdError.textContent = d.error || '修改失败';
                     pwdError.style.display = 'block';

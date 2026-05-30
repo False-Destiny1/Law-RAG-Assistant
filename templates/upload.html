@@ -211,6 +211,7 @@ document.addEventListener('DOMContentLoaded', function() {
         const formData = new FormData(this);
         const xhr = new XMLHttpRequest();
         xhr.open('POST', '/upload');
+        xhr.setRequestHeader('X-CSRF-Token', getCsrfToken());
 
         xhr.upload.addEventListener('progress', function(ev) {
             if (ev.lengthComputable) {
