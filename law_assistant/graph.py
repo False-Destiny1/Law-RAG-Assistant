@@ -153,9 +153,7 @@ class LegalKnowledgeGraph:
             try:
                 from neo4j import GraphDatabase
 
-                self._driver = GraphDatabase.driver(
-                    self._uri, auth=(self._user, self._password), connection_timeout=10
-                )
+                self._driver = GraphDatabase.driver(self._uri, auth=(self._user, self._password), connection_timeout=10)
                 self._driver.verify_connectivity()
                 self._available = True
                 logger.info(f"Neo4j 连接成功: {self._uri}")

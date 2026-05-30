@@ -962,6 +962,7 @@ async def ask_stream(request: Request, user: User = Depends(require_user), db: S
 
     safe, reason = check_injection(user_input)
     if not safe:
+
         def _reject():
             yield f"data: {_json.dumps({'error': reason}, ensure_ascii=False)}\n\n"
             yield 'data: {"done": true}\n\n'

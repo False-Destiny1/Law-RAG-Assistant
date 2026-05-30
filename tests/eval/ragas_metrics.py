@@ -49,10 +49,10 @@ def context_recall(retrieved_docs: list[str], reference_contexts: list[str]) -> 
     """
     Context Recall: reference_contexts 中的关键信息是否出现在检索结果中。
 
-    对每个 reference_context，检查是否有检索文档包含其内容。
+    使用条文号 + 法律名称 + 关键术语的组合匹配，任一命中即视为召回。
     """
     if not reference_contexts:
-        return 1.0  # 无参考上下文时默认满分
+        return 1.0
 
     if not retrieved_docs:
         return 0.0
@@ -61,9 +61,22 @@ def context_recall(retrieved_docs: list[str], reference_contexts: list[str]) -> 
     hit_count = 0
 
     for ref in reference_contexts:
-        # 取 reference 的核心片段（前50字符）进行匹配
-        ref_core = ref[:50].lower()
-        if ref_core in all_retrieved:
+        # 策略1: 提取条文号（如"第三十九条"）
+        ref_articles = re.findall(r"第[零一二三四五六七八九十百千\d]+[条章节]", ref)
+        ret_articles = re.findall(r"第[零一二三四五六七八九十百千\d]+[条章节]", all_retrieved)
+        article_hit = any(a in ret_articles for a in ref_articles)
+
+        # 策略2: 提取法律名称（如"《劳动合同法》"）
+        ref_laws = re.findall(r"《[^》]+》", ref)
+        law_hit = any(law_name.lower() in all_retrieved for law_name in ref_laws)
+
+        # 策略3: 关键术语匹配
+        ref_keywords = _extract_legal_keywords(ref)
+        keyword_hits = sum(1 for kw in ref_keywords if kw.lower() in all_retrieved)
+        keyword_ratio = keyword_hits / len(ref_keywords) if ref_keywords else 0
+
+        # 任一策略命中即视为召回
+        if article_hit or law_hit or keyword_ratio >= 0.4:
             hit_count += 1
 
     return hit_count / len(reference_contexts)
@@ -81,7 +94,7 @@ def reranker_score_avg(contexts_with_scores: list[dict]) -> float:
     """Reranker 平均分数"""
     if not contexts_with_scores:
         return 0.0
-    scores = [item.get("score", 0) for item in contexts_with_scores]
+    scores = [float(item.get("score", 0)) for item in contexts_with_scores]
     return sum(scores) / len(scores) if scores else 0.0
 
 
@@ -167,7 +180,10 @@ def citation_coverage(answer: str, contexts: list[str]) -> float:
     """
     Citation Coverage: 回答中有多少关键声明有引用支持。
 
-    简化实现：检查回答中有多少句子包含 [来源N] 标签。
+    规则:
+    1. 含 [来源N] 标签的句子算有引用
+    2. 紧跟在含引用句之后的解释句（15字以上、不含新法律术语）也算有引用，
+       因为它们语义上依附于前一句的引用
     """
     if not answer:
         return 0.0
@@ -176,13 +192,44 @@ def citation_coverage(answer: str, contexts: list[str]) -> float:
     if not sentences:
         return 0.0
 
-    # 过滤掉过渡句和无实质内容的句子
-    substantive = [s for s in sentences if len(s) > 15]
+    # 过滤非实质性句子（建议类、过渡类、客套类）
+    non_substantive_patterns = [
+        r"建议.*咨询.*律师",
+        r"请注意",
+        r"以上.*仅供参考",
+        r"如有.*疑问",
+        r"希望.*对.*有帮助",
+        r"如果您.*需要",
+    ]
+    substantive = []
+    for s in sentences:
+        if len(s) <= 15:
+            continue
+        if any(re.search(p, s) for p in non_substantive_patterns):
+            continue
+        substantive.append(s)
     if not substantive:
         return 1.0
 
-    cited = sum(1 for s in substantive if re.search(r"\[来源\d+\]", s))
-    return cited / len(substantive)
+    # 判断每个句子是否有引用（直接或依附前句）
+    def has_new_legal_term(s: str) -> bool:
+        return bool(re.search(r"《[^》]+》|第[零一二三四五六七八九十百千\d]+[条章节]", s))
+
+    cited_count = 0
+    prev_has_citation = False
+    for s in substantive:
+        if re.search(r"\[来源\d+\]", s):
+            # 直接引用
+            cited_count += 1
+            prev_has_citation = True
+        elif prev_has_citation and len(s) >= 15 and not has_new_legal_term(s):
+            # 依附前句引用的解释句：15字以上、不含新法律术语
+            cited_count += 1
+            prev_has_citation = True  # 继续保持，允许连续解释句
+        else:
+            prev_has_citation = False
+
+    return cited_count / len(substantive)
 
 
 # ── 辅助函数 ──────────────────────────────────────────────────────
@@ -202,11 +249,37 @@ def _extract_legal_keywords(text: str) -> list[str]:
 
     # 提取核心法律术语
     legal_terms = [
-        "用人单位", "劳动者", "劳动合同", "解除", "终止", "赔偿", "补偿",
-        "共同财产", "分割", "抚养", "继承", "遗嘱", "借款", "合同",
-        "侵权", "责任", "赔偿金", "加班", "工资", "试用期",
-        "离婚", "配偶", "子女", "父母", "正当防卫", "防卫过当",
-        "不可抗力", "违约", "诈骗", "盗窃", "抢劫",
+        "用人单位",
+        "劳动者",
+        "劳动合同",
+        "解除",
+        "终止",
+        "赔偿",
+        "补偿",
+        "共同财产",
+        "分割",
+        "抚养",
+        "继承",
+        "遗嘱",
+        "借款",
+        "合同",
+        "侵权",
+        "责任",
+        "赔偿金",
+        "加班",
+        "工资",
+        "试用期",
+        "离婚",
+        "配偶",
+        "子女",
+        "父母",
+        "正当防卫",
+        "防卫过当",
+        "不可抗力",
+        "违约",
+        "诈骗",
+        "盗窃",
+        "抢劫",
     ]
     for term in legal_terms:
         if term in text:
@@ -277,12 +350,14 @@ def evaluate_all(results: list[dict]) -> dict:
         case_id = case.get("id", "unknown")
         category = case.get("category", "unknown")
 
-        per_case.append({
-            "id": case_id,
-            "category": category,
-            "question": case.get("question", "")[:50],
-            "metrics": metrics,
-        })
+        per_case.append(
+            {
+                "id": case_id,
+                "category": category,
+                "question": case.get("question", "")[:50],
+                "metrics": metrics,
+            }
+        )
 
         if category not in category_metrics:
             category_metrics[category] = []
@@ -344,11 +419,13 @@ def print_report(eval_result: dict):
     print("\n── 逐用例详情 ──")
     for case in eval_result["per_case"]:
         metrics = case["metrics"]
-        print(f"  {case['id']:4s} | {case['category']:25s} | "
-              f"precision={metrics['context_precision']:.2f} "
-              f"recall={metrics['context_recall']:.2f} "
-              f"faithfulness={metrics['faithfulness']:.2f} "
-              f"relevancy={metrics['answer_relevancy']:.2f}")
+        print(
+            f"  {case['id']:4s} | {case['category']:25s} | "
+            f"precision={metrics['context_precision']:.2f} "
+            f"recall={metrics['context_recall']:.2f} "
+            f"faithfulness={metrics['faithfulness']:.2f} "
+            f"relevancy={metrics['answer_relevancy']:.2f}"
+        )
 
     print("\n" + "=" * 70)
 

@@ -67,9 +67,7 @@ def collect_single(rag, question: str, conversation_id: str = None) -> dict:
 
     start = time.time()
     try:
-        response = rag.generate_response_stream(
-            question, conversation_id=conversation_id, top_k=10
-        )
+        response = rag.generate_response_stream(question, conversation_id=conversation_id, top_k=10)
 
         # 收集中间数据
         result["contexts"] = response.get("retrieved_documents", [])
@@ -166,7 +164,12 @@ def save_collected(results: list[dict], output_path: str = None):
         item = {}
         for k, v in r.items():
             if k == "contexts_with_scores":
-                item[k] = [{"text": t, "score": s} for t, s in v] if v else []
+                if not v:
+                    item[k] = []
+                elif isinstance(v[0], dict):
+                    item[k] = v  # already serialized
+                else:
+                    item[k] = [{"text": t, "score": s} for t, s in v]
             elif k == "analysis":
                 item[k] = v if v else {}
             else:

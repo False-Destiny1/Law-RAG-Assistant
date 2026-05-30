@@ -42,7 +42,7 @@ def main():
         print(f"使用全部数据集 ({len(dataset)} 个用例)")
 
     if args.limit > 0:
-        dataset = dataset[:args.limit]
+        dataset = dataset[: args.limit]
         print(f"限制为前 {args.limit} 个用例")
 
     # 收集阶段

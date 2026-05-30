@@ -744,8 +744,10 @@ class DeepSeekApiRag:
         # Defense-in-depth: 再次检查注入（防止其他入口绕过 app.py 层）
         safe, reason = check_injection(query)
         if not safe:
+
             class _RejectChunk:
                 __slots__ = ("content",)
+
                 def __init__(self, c):
                     self.content = c
 

@@ -163,7 +163,9 @@ class DocumentProcessor:
                         page_lines.extend(result.rec_texts)
                 page_text = "\n".join(page_lines)
                 if page_text.strip():
-                    documents.append(Document(page_content=page_text, metadata={"source": file_path, "page": page_num - 1}))
+                    documents.append(
+                        Document(page_content=page_text, metadata={"source": file_path, "page": page_num - 1})
+                    )
                 else:
                     logger.warning(f"[OCR] 第 {page_num} 页 OCR 未识别到文本")
                 del img, img_array, images
