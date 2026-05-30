@@ -8,18 +8,32 @@ echo    Law Assistant - Starting...
 echo  ========================================
 echo.
 
-set "PYTHON_EXE=E:\anaconda3\envs\pytorch\python.exe"
 set "PROJECT_DIR=%~dp0"
 set HOST=127.0.0.1
 set PORT=8080
-set "REDIS_EXE=E:\Redis\redis-server.exe"
-set "NEO4J_HOME=E:\neo4j-chs-community-5.26.2-windows"
 
-if not exist %PYTHON_EXE% (
-    echo [ERROR] Python not found: %PYTHON_EXE%
-    echo Please check Anaconda pytorch environment
-    pause
-    exit /b 1
+:: Resolve Python — prefer conda env, fallback to PATH
+if defined PYTHON_EXE goto :python_found
+where python >nul 2>&1
+if %errorlevel%==0 (
+    for /f "delims=" %%i in ('where python') do set "PYTHON_EXE=%%i" & goto :python_found
+)
+echo [ERROR] Python not found in PATH. Please activate your conda environment or set PYTHON_EXE.
+pause
+exit /b 1
+:python_found
+
+:: Resolve Redis — prefer REDIS_EXE env var, fallback to PATH
+if not defined REDIS_EXE (
+    where redis-server >nul 2>&1
+    if %errorlevel%==0 (
+        for /f "delims=" %%i in ('where redis-server') do set "REDIS_EXE=%%i"
+    )
+)
+
+:: Resolve Neo4j — prefer NEO4J_HOME env var
+if not defined NEO4J_HOME (
+    if exist "C:\neo4j" set "NEO4J_HOME=C:\neo4j"
 )
 
 %PYTHON_EXE% --version
