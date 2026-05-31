@@ -1081,7 +1081,58 @@ def submit_feedback(
     else:
         db.add(MessageFeedback(user_id=user.id, message_id=message_id, chat_id=chat_id, rating=rating))
     db.commit()
+
+    # Track online evaluation metrics
+    from law_assistant.online_eval import online_eval
+    online_eval.record_feedback(rating, confidence_level="high")
+
+    # Adaptive weight learning (thumbs up/down adjusts retrieval weights)
+    from law_assistant.weight_adaptation import weight_adapter
+    weight_adapter.update_from_feedback(["vector", "bm25", "graph"], rating)
+
     return {"success": True, "rating": rating}
+
+
+@app.get("/api/admin/ab-tests")
+def list_ab_tests(user: User = Depends(require_user)):
+    """管理员查看 A/B 测试结果"""
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    from law_assistant.ab_test import ab_manager
+    results = {}
+    for name in ab_manager._experiments:
+        results[name] = ab_manager.get_results(name)
+    return results
+
+
+@app.get("/api/admin/online-eval")
+def get_online_eval(user: User = Depends(require_user)):
+    """管理员查看线上满意度指标"""
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    from law_assistant.online_eval import online_eval
+    return online_eval.get_all_metrics()
+
+
+@app.get("/api/admin/adaptive-weights")
+def get_adaptive_weights(user: User = Depends(require_user)):
+    """管理员查看自适应学习后的检索权重"""
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    from law_assistant.weight_adaptation import weight_adapter
+    return {"weights": weight_adapter.get_weights(), "update_count": weight_adapter._update_count}
+
+
+@app.post("/api/admin/adaptive-weights/reset")
+def reset_adaptive_weights(user: User = Depends(require_user)):
+    """重置自适应权重为默认值"""
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    from law_assistant.weight_adaptation import weight_adapter
+    with weight_adapter._lock:
+        weight_adapter._weights = {"vector": 0.4, "bm25": 0.3, "graph": 0.3}
+        weight_adapter._update_count = 0
+    return {"success": True, "weights": weight_adapter.get_weights()}
 
 
 @app.post("/api/intervention")
