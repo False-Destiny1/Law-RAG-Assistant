@@ -45,7 +45,7 @@ router = APIRouter()
 
 # ── Paths ────────────────────────────────────────────────────────────
 UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "uploads")
-KNOWLEDGE_BASE_FOLDER = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "knowledge_base")
+KNOWLEDGE_BASE_FOLDER = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "knowledge_base")
 
 
 # ══════════════════════════════════════════════════════════════════════

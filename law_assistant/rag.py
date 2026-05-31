@@ -166,7 +166,7 @@ class DeepSeekApiRag:
         self.vector_db = None
 
         # 4. BM25
-        self.bm25_retriever = BM25Retriever("bm25_index.pkl", rebuild_threshold=50)
+        self.bm25_retriever = BM25Retriever("data/bm25_index.pkl", rebuild_threshold=50)
 
         # 5. Document processor
         self.document_processor = DocumentProcessor()

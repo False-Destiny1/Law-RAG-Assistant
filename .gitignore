@@ -207,7 +207,7 @@ __marimo__/
 # Project-specific
 BAAI/
 law_faiss/
-bm25_index.pkl
+data/bm25_index.pkl
 uploads/
 instance/
 baseline_results.json

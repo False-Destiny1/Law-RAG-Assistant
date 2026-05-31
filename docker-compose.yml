@@ -9,10 +9,10 @@ services:
       - postgres
       - redis
     volumes:
-      - ./knowledge_base:/app/knowledge_base
+      - ./data/knowledge_base:/app/data/knowledge_base
       - ./uploads:/app/uploads
       - ./law_faiss:/app/law_faiss
-      - ./bm25_index.pkl:/app/bm25_index.pkl
+      - ./data/bm25_index.pkl:/app/data/bm25_index.pkl
 
   postgres:
     image: postgres:16

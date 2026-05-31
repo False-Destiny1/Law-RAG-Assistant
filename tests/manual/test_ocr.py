@@ -76,7 +76,7 @@ def test_ocr_text_pdf():
     proc = DocumentProcessor()
 
     # 找一个知识库中的文本 PDF
-    kb_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "knowledge_base")
+    kb_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "knowledge_base")
     if not os.path.exists(kb_dir):
         print("[SKIP] test_ocr_text_pdf — knowledge_base 目录不存在")
         return
@@ -99,7 +99,7 @@ def test_legal_detection():
 
     proc = DocumentProcessor()
 
-    kb_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "knowledge_base")
+    kb_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "knowledge_base")
     if not os.path.exists(kb_dir):
         print("[SKIP] test_legal_detection — knowledge_base 目录不存在")
         return
@@ -122,7 +122,7 @@ def test_process_document():
 
     proc = DocumentProcessor()
 
-    kb_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "knowledge_base")
+    kb_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "knowledge_base")
     if not os.path.exists(kb_dir):
         print("[SKIP] test_process_document — knowledge_base 目录不存在")
         return

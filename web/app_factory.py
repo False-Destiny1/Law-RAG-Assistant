@@ -38,11 +38,11 @@ def _init_rag():
 
     # Build indexes if needed
     need_faiss = not os.path.exists(db_path)
-    need_bm25 = not os.path.exists("bm25_index.pkl")
+    need_bm25 = not os.path.exists("data/bm25_index.pkl")
 
     if need_faiss or need_bm25:
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        knowledge_base_folder = os.path.join(project_root, "knowledge_base")
+        knowledge_base_folder = os.path.join(project_root, "data", "knowledge_base")
         all_texts = []
         if os.path.exists(knowledge_base_folder) and os.listdir(knowledge_base_folder):
             logger.info(f"正在处理 knowledge_base 文件夹: {knowledge_base_folder}")
@@ -167,7 +167,7 @@ def create_app() -> FastAPI:
     # Create directories
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     os.makedirs(os.path.join(project_root, "uploads"), exist_ok=True)
-    os.makedirs(os.path.join(project_root, "knowledge_base"), exist_ok=True)
+    os.makedirs(os.path.join(project_root, "data", "knowledge_base"), exist_ok=True)
 
     # Initialize DB, admin, and RAG model
     _init_admin()
