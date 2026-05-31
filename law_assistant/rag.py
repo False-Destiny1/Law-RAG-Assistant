@@ -13,8 +13,6 @@ import numpy as np
 import yaml
 from dotenv import load_dotenv
 from langchain_community.vectorstores.faiss import FAISS
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
 from law_assistant.bm25 import BM25Retriever
 from law_assistant.graph import LegalKnowledgeGraph
@@ -152,107 +150,40 @@ def _cuda_available() -> bool:
 
 class DeepSeekApiRag:
     def __init__(self, api_key: str = None, db_path: str = None):
-        # 从环境变量获取配置，如果参数为None则使用环境变量
+        from law_assistant.factories import EmbeddingFactory, LLMFactory, RerankerFactory
+
         if db_path is None:
             db_path = os.getenv("VECTOR_DB_PATH", "law_faiss")
 
-        # 1. 初始化嵌入模型
-        logger.info("正在加载嵌入模型...")
-        embedding_provider = os.getenv("EMBEDDING_PROVIDER", "dashscope").lower()
-        if embedding_provider == "dashscope":
-            embedding_api_key = os.getenv("EMBEDDING_API_KEY")
-            embedding_base_url = os.getenv("EMBEDDING_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
-            embedding_model_name = os.getenv("EMBEDDING_MODEL", "text-embedding-v2")
-            fallback_model_name = os.getenv("EMBEDDING_FALLBACK_MODEL", "text-embedding-async-v2")
-            logger.info(f"使用 DashScope 嵌入模型: {embedding_model_name} (回退: {fallback_model_name})")
-            self.embedding_model = OpenAIEmbeddings(
-                api_key=embedding_api_key,
-                base_url=embedding_base_url,
-                model=embedding_model_name,
-                check_embedding_ctx_length=False,
-                chunk_size=10,
-            )
-            self.fallback_embedding_model = OpenAIEmbeddings(
-                api_key=embedding_api_key,
-                base_url=embedding_base_url,
-                model=fallback_model_name,
-                check_embedding_ctx_length=False,
-                chunk_size=10,
-            )
-        else:
-            embedding_model_name = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5")
-            # 支持本地路径或HuggingFace模型名
-            model_path = embedding_model_name
-            if not os.path.isabs(model_path) and os.path.isdir(embedding_model_name):
-                model_path = os.path.abspath(embedding_model_name)
-            elif not os.path.isabs(model_path) and not os.path.isdir(model_path):
-                # 尝试项目目录下的本地路径
-                local_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), embedding_model_name)
-                if os.path.isdir(local_path):
-                    model_path = local_path
-            # 自动检测 CUDA 可用性
-            if _cuda_available():
-                device = "cuda"
-            else:
-                device = "cpu"
-                logger.warning("CUDA 不可用，回退到 CPU 模式（推理速度会较慢）")
-            logger.info(f"使用本地嵌入模型: {model_path} (device={device})")
-            self.embedding_model = HuggingFaceEmbeddings(
-                model_name=model_path, model_kwargs={"device": device}, encode_kwargs={"normalize_embeddings": True}
-            )
-            self.fallback_embedding_model = None
+        # 1. Embedding (factory)
+        self.embedding_model, self.fallback_embedding_model = EmbeddingFactory.create()
 
-        # 2. 初始化 LLM API（优先 MiMo，回退 DeepSeek）
-        mimo_api_key = os.getenv("MIMO_API_KEY")
-        if mimo_api_key:
-            mimo_base_url = os.getenv("MIMO_BASE_URL", "https://token-plan-cn.xiaomimimo.com/v1")
-            mimo_model = os.getenv("MIMO_MODEL", "mimo-v2.5-pro")
-            logger.info(f"正在初始化 MiMo API (模型: {mimo_model})...")
-            self.llm = ChatOpenAI(
-                api_key=mimo_api_key,
-                base_url=mimo_base_url,
-                model=mimo_model,
-            )
-        else:
-            deepseek_api_key = api_key or os.getenv("DEEPSEEK_API_KEY")
-            deepseek_base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
-            deepseek_model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
-            logger.info(f"正在初始化 DeepSeek API (模型: {deepseek_model})...")
-            self.llm = ChatOpenAI(
-                api_key=deepseek_api_key,
-                base_url=deepseek_base_url,
-                model=deepseek_model,
-            )
+        # 2. LLM (factory)
+        self.llm = LLMFactory.create()
 
-        # 3. 初始化向量数据库
+        # 3. Vector DB
         self.db_path = db_path
         self.vector_db = None
 
-        # 4. 初始化BM25检索器
+        # 4. BM25
         self.bm25_retriever = BM25Retriever("bm25_index.pkl", rebuild_threshold=50)
 
-        # 5. 初始化文档处理器
+        # 5. Document processor
         self.document_processor = DocumentProcessor()
         self.general_splitter = GeneralDocumentSplitter(chunk_size=200, chunk_overlap=20)
 
-        # 6. 初始化Reranker配置（默认使用本地模型）
+        # 6. Reranker (factory)
         reranker_provider = os.getenv("RERANKER_PROVIDER", "local").lower()
         self._reranker_provider = reranker_provider
         self._local_reranker = None
         self.reranker_api_key = None
 
         if reranker_provider == "local":
-            from sentence_transformers import CrossEncoder
-
-            reranker_model_path = os.getenv("RERANKER_MODEL_PATH", "BAAI/bge-reranker-v2-m3")
-            device = "cuda" if _cuda_available() else "cpu"
-            self._local_reranker = CrossEncoder(reranker_model_path, max_length=512, device=device)
-            logger.info(f"使用本地 Reranker: {reranker_model_path} (device={device})")
+            self._local_reranker = RerankerFactory.create("local")
         else:
-            self.reranker_api_key = os.getenv("RERANKER_API_KEY")
-            self.reranker_url = os.getenv("RERANKER_BASE_URL", "https://api.siliconflow.cn/v1/rerank")
-            self.reranker_model = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
-            logger.info(f"使用 DashScope Reranker: {self.reranker_model}")
+            reranker_config = RerankerFactory.create("dashscope")
+            self.reranker_api_key = reranker_config["api_key"]
+            self.reranker_model = reranker_config["model"]
 
         # 7. 初始化记忆模块
         self.memory = ConversationMemory(max_history_turns=5)
