@@ -78,7 +78,7 @@ class TestConversationMemory:
             mem.add_message("chat_1", role, f"这是第{i}条消息，内容足够长以触发基于token的摘要压缩。" * 20)
 
         assert len(summaries) > 0
-        conv = mem.conversations["chat_1"]
+        conv = mem.conversations["chat_1"][0]
         assert conv.get("summary", "") != ""
 
     def test_formatted_history_with_summary(self):

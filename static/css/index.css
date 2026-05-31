@@ -757,3 +757,34 @@
         max-width: 90%;
     }
 }
+
+/* ── Intervention Banner ── */
+.intervention-banner {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    padding: var(--sp-2) var(--sp-3);
+    margin-top: var(--sp-2);
+    background: var(--c-surface-alt, #FFF8E7);
+    border: 1px solid var(--c-accent);
+    border-radius: var(--radius-sm);
+    font-size: 0.85rem;
+    color: var(--c-text-secondary);
+    animation: fadeSlideIn 0.3s var(--ease-out);
+}
+
+.intervention-icon {
+    color: var(--c-accent);
+    font-size: 1.1rem;
+    flex-shrink: 0;
+}
+
+.intervention-text {
+    flex: 1;
+}
+
+.intervention-btn {
+    flex-shrink: 0;
+    padding: var(--sp-1) var(--sp-3) !important;
+    font-size: 0.8rem !important;
+}

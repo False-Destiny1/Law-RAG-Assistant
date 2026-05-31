@@ -27,6 +27,114 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
+
+# ── Helper for no-confidence streaming ────────────────────────────────
+class _SimpleChunk:
+    """Minimal chunk wrapper for non-LLM streaming responses."""
+    __slots__ = ("content",)
+
+    def __init__(self, content: str):
+        self.content = content
+
+
+# ── Reciprocal Rank Fusion ────────────────────────────────────────────
+def reciprocal_rank_fusion(results_lists: list[list[tuple]], k: int = 60) -> list[tuple]:
+    """RRF 融合多路检索结果，不依赖分数归一化，对不同检索器更鲁棒。
+    results_lists: 每个检索器返回的 [(doc, score), ...] 列表
+    k: 常数，控制排名影响衰减速度（默认60）
+    """
+    fused_scores: dict[str, float] = {}
+    doc_map: dict[str, str] = {}
+    for results in results_lists:
+        for rank, (doc, _score) in enumerate(results, 1):
+            if doc not in fused_scores:
+                fused_scores[doc] = 0.0
+                doc_map[doc] = doc
+            fused_scores[doc] += 1.0 / (k + rank)
+    sorted_items = sorted(fused_scores.items(), key=lambda x: -x[1])
+    return [(doc_map[doc], score) for doc, score in sorted_items]
+
+
+# ── Confidence Evaluation & Human Intervention ────────────────────────
+
+HIGH_CONFIDENCE_THRESHOLD = 0.7
+LOW_CONFIDENCE_THRESHOLD = 0.3
+
+
+class ConfidenceEvaluator:
+    """评估检索结果是否足够回答用户问题"""
+
+    def evaluate(self, query: str, retrieved_docs: list, reranker_scores: list[float]) -> dict:
+        """
+        评估检索结果的充分性
+        Returns: {"level": "high"|"low"|"none", "score": float, "reason": str}
+        """
+        if not retrieved_docs:
+            return {"level": "none", "score": 0.0, "reason": "未检索到相关法律文档"}
+
+        max_score = max(reranker_scores) if reranker_scores else 0.0
+        high_score_count = sum(1 for s in reranker_scores if s >= LOW_CONFIDENCE_THRESHOLD)
+        unique_laws = set()
+        for doc in retrieved_docs:
+            # Try to extract law name from metadata or content
+            if isinstance(doc, tuple):
+                doc_text = doc[0]
+            else:
+                doc_text = doc
+            import re as _re
+            law_match = _re.search(r"《(.+?)》", doc_text)
+            if law_match:
+                unique_laws.add(law_match.group(1))
+
+        coverage_score = min(high_score_count / 3, 1.0)
+        diversity_score = min(len(unique_laws) / 2, 1.0)
+        final_score = max_score * 0.5 + coverage_score * 0.3 + diversity_score * 0.2
+
+        if final_score >= HIGH_CONFIDENCE_THRESHOLD:
+            level = "high"
+            reason = "检索到充分的法律依据"
+        elif final_score >= LOW_CONFIDENCE_THRESHOLD:
+            level = "low"
+            reason = f"检索到部分相关文档（{high_score_count}篇），但覆盖不够全面"
+        else:
+            level = "none"
+            reason = f"检索结果不足（最高分: {max_score:.2f}），可能缺少相关法律知识"
+
+        return {"level": level, "score": round(final_score, 4), "reason": reason}
+
+
+class ResponseStrategy:
+    """根据置信度选择响应策略"""
+
+    DISCLAIMER_TEMPLATE = """
+
+---
+
+> **温馨提示：**
+> 当前知识库可能未完全覆盖您的问题（{reason}）。
+> 以上回答仅供参考，如需更专业的法律建议，请点击下方按钮联系人工律师咨询。
+"""
+
+    NO_CONFIDENCE_TEMPLATE = """感谢您的提问。
+
+**当前知识库暂未收录相关法律规定**，无法为您提供准确的法律建议。
+
+可能的原因：
+- 该问题涉及的地方法规或行业规定未纳入知识库
+- 问题涉及的法律领域超出当前覆盖范围
+- 问题表述较为复杂，需要人工分析
+
+**建议您：**
+1. 点击下方按钮 **[转人工咨询]**，我们的专业律师将为您提供帮助
+2. 您的问题已被记录，我们会尽快补充相关法律知识
+"""
+
+    def get_no_confidence_response(self) -> str:
+        return self.NO_CONFIDENCE_TEMPLATE
+
+    def get_disclaimer(self, reason: str) -> str:
+        return self.DISCLAIMER_TEMPLATE.format(reason=reason)
+
 # Shared thread pool for concurrent retrieval (avoids creating a new pool per query)
 _SHARED_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=8)
 atexit.register(_SHARED_EXECUTOR.shutdown, wait=False)
@@ -178,6 +286,14 @@ class DeepSeekApiRag:
         # 12. FAISS 写操作锁（保护并发写入安全）
         self._faiss_write_lock = threading.Lock()
         self._faiss_dirty = False
+
+        # 统一文档注册表（FAISS 和 BM25 重建的唯一数据源）
+        self._document_registry: list[str] = []
+        self._registry_lock = threading.Lock()
+
+        # 13. 置信度评估器与响应策略（法律缺失时人工介入）
+        self.confidence_evaluator = ConfidenceEvaluator()
+        self.response_strategy = ResponseStrategy()
 
         # 如果向量数据库已存在，直接加载
         if os.path.exists(db_path):
@@ -349,6 +465,7 @@ class DeepSeekApiRag:
     def analyze_query(self, query: str, conversation_id: str = None, conversation_history: str = None) -> dict:
         """一次 LLM 调用完成：多轮融合 + 术语改写 + 查询分解 + HyDE 文档生成
         返回: {"rewritten_query": str, "sub_queries": [str], "hypothetical_doc": str}
+        带重试机制（最多3次）和输出校验。
         """
         if conversation_history is not None:
             history = conversation_history
@@ -359,32 +476,56 @@ class DeepSeekApiRag:
                 if history == "无对话历史":
                     history = ""
 
-        try:
-            prompt = self._get_prompt(
-                "query_analysis_prompt", query=query, conversation_history=history or "无对话历史"
-            )
-            response = self.llm.invoke(prompt)
-            content = response.content.strip()
-            # 提取 JSON（兼容 markdown code block 包裹）
-            if "```" in content:
-                match = re.search(r"\{[\s\S]*\}", content)
-                if match:
-                    content = match.group()
-            result = json.loads(content)
-            rewritten = result.get("rewritten_query", query)
-            sub_queries = result.get("sub_queries", [rewritten])
-            hypothetical = result.get("hypothetical_doc", "")
-            logger.info(
-                f"查询分析: 原始='{query}' → 改写='{rewritten}', 子查询={len(sub_queries)}个, HyDE={'有' if hypothetical else '无'}"
-            )
-            return {
-                "rewritten_query": rewritten if len(rewritten) > 3 else query,
-                "sub_queries": [q for q in sub_queries if len(q) > 3] or [rewritten],
-                "hypothetical_doc": hypothetical,
-            }
-        except Exception as e:
-            logger.warning(f"查询分析失败，使用原始查询: {e}")
-            return {"rewritten_query": query, "sub_queries": [query], "hypothetical_doc": ""}
+        prompt = self._get_prompt(
+            "query_analysis_prompt", query=query, conversation_history=history or "无对话历史"
+        )
+
+        for attempt in range(3):
+            try:
+                response = self.llm.invoke(prompt)
+                content = response.content.strip()
+                # 提取 JSON（兼容 markdown code block 包裹）
+                if "```" in content:
+                    match = re.search(r"\{[\s\S]*\}", content)
+                    if match:
+                        content = match.group()
+                result = json.loads(content)
+
+                # 校验输出结构
+                rewritten = result.get("rewritten_query", query)
+                sub_queries = result.get("sub_queries", [])
+                hypothetical = result.get("hypothetical_doc", "")
+
+                if not rewritten or len(rewritten) < 3:
+                    rewritten = query
+                if not sub_queries:
+                    sub_queries = [rewritten]
+                # 限制子查询数量
+                sub_queries = [q for q in sub_queries if isinstance(q, str) and len(q) > 3][:3]
+                if not sub_queries:
+                    sub_queries = [rewritten]
+
+                logger.info(
+                    f"查询分析: 原始='{query}' → 改写='{rewritten}', 子查询={len(sub_queries)}个, "
+                    f"HyDE={'有' if hypothetical else '无'}"
+                )
+                return {
+                    "rewritten_query": rewritten,
+                    "sub_queries": sub_queries,
+                    "hypothetical_doc": hypothetical,
+                }
+            except (json.JSONDecodeError, KeyError, TypeError) as e:
+                logger.warning(f"查询分析解析失败 (第{attempt + 1}次): {e}")
+                if attempt == 2:
+                    break
+            except Exception as e:
+                logger.warning(f"查询分析调用失败 (第{attempt + 1}次): {e}")
+                if attempt == 2:
+                    break
+
+        # 全部重试失败，降级为原始查询
+        logger.warning("查询分析全部失败，使用原始查询")
+        return {"rewritten_query": query, "sub_queries": [query], "hypothetical_doc": ""}
 
     def add_documents(self, documents: list[str], save_to_disk: bool = True):
         """添加文档到向量数据库和BM25索引"""
@@ -416,13 +557,17 @@ class DeepSeekApiRag:
         # 使用增量添加
         self.bm25_retriever.add_documents(documents)
 
+        # 同步文档注册表
+        with self._registry_lock:
+            self._document_registry.extend(documents)
+
         if save_to_disk:
             self.save_vector_db()
             self.bm25_retriever.save_index()
 
-        logger.info(
-            f"文档添加完成 - 向量数据库: {self.get_document_count()} 个文档, BM25索引: {self.bm25_retriever.get_document_count()} 个文档"
-        )
+        faiss_count = self.get_document_count()
+        bm25_count = self.bm25_retriever.get_document_count()
+        logger.info(f"文档添加完成 - 向量数据库: {faiss_count} 个文档, BM25索引: {bm25_count} 个文档")
 
     def add_file_documents(self, file_path: str, save_to_disk: bool = True):
         """添加单个文件文档"""
@@ -602,46 +747,25 @@ class DeepSeekApiRag:
         return results
 
     def hybrid_retrieve_documents(self, query: str, top_k: int = 10) -> list[tuple[str, float]]:
-        """三路融合检索：向量检索 + BM25 检索 + 图谱检索（顺序执行，外层 retrieve_documents 已并行）"""
-        all_results = []
-
+        """三路融合检索：向量检索 + BM25 检索 + 图谱检索（RRF 融合）"""
         # 顺序执行三种检索（避免嵌套线程池死锁，外层已通过线程池并行多个查询）
         vector_results = self._vector_search(query, top_k)
-        all_results.extend(vector_results)
         bm25_res = self._bm25_search(query, top_k)
-        all_results.extend(bm25_res)
         graph_res = self._graph_search(query, top_k)
-        all_results.extend(graph_res)
         logger.info(f"向量检索返回 {len(vector_results)} 个结果")
         logger.info(f"BM25检索返回 {len(bm25_res)} 个结果")
         logger.info(f"图谱检索返回 {len(graph_res)} 个结果")
 
-        # 结果融合（加权求和）
-        vector_w, bm25_w, graph_w = self.vector_weight, self.bm25_weight, self.graph_weight
-        if not self.knowledge_graph.is_available:
-            # Neo4j 不可用时重新归一化权重到 1.0
-            total = vector_w + bm25_w
-            if total > 0:
-                vector_w, bm25_w = vector_w / total, bm25_w / total
-        weight_map = {
-            "vector": vector_w,
-            "bm25": bm25_w,
-            "graph": graph_w,
-        }
-        fused_results = {}
-        for doc, score, method in all_results:
-            weight = weight_map.get(method, 0.3)
-            if doc not in fused_results:
-                fused_results[doc] = score * weight
-            else:
-                # 同一文档被多种方法命中时累加权重（多方法命中的文档应得分更高）
-                fused_results[doc] += score * weight
+        # 构建各路结果列表（转为 (doc, score) 格式）
+        result_lists = []
+        result_lists.append([(doc, score) for doc, score, _ in vector_results])
+        result_lists.append([(doc, score) for doc, score, _ in bm25_res])
+        if self.knowledge_graph.is_available:
+            result_lists.append([(doc, score) for doc, score, _ in graph_res])
 
-        # 排序并返回top_k
-        sorted_results = sorted(fused_results.items(), key=lambda x: x[1], reverse=True)
-
-        final_results = [(doc, score) for doc, score in sorted_results[: int(top_k * 1.5)]]
-        logger.info(f"三路融合检索后返回 {len(final_results)} 个结果")
+        # RRF 融合（不依赖分数归一化，对不同检索器更鲁棒）
+        final_results = reciprocal_rank_fusion(result_lists)[: int(top_k * 1.5)]
+        logger.info(f"RRF 融合后返回 {len(final_results)} 个结果")
 
         return final_results
 
@@ -850,20 +974,29 @@ class DeepSeekApiRag:
         self._faiss_dirty = True
         logger.info("FAISS 索引已标记为需要重建")
 
+    def remove_from_registry(self, texts: list[str]):
+        """从统一文档注册表中移除指定文本（文档删除时调用）"""
+        target_set = set(texts)
+        with self._registry_lock:
+            before = len(self._document_registry)
+            self._document_registry = [t for t in self._document_registry if t not in target_set]
+            removed = before - len(self._document_registry)
+        if removed:
+            logger.info(f"从文档注册表中移除 {removed} 个文本块")
+
     def rebuild_faiss_if_dirty(self):
-        """惰性重建 FAISS 索引（仅在标记为 dirty 且有文档时重建）"""
+        """惰性重建 FAISS 索引（从统一文档注册表重建，确保数据一致性）"""
         if not self._faiss_dirty:
-            return
-        if self.vector_db is None and self.bm25_retriever.get_document_count() == 0:
-            self._faiss_dirty = False
             return
         # Double-check under lock
         with self._faiss_write_lock:
             if not self._faiss_dirty:
                 return
 
-        # Compute embedding OUTSIDE the lock (may take seconds)
-        docs = self.bm25_retriever.documents
+        # 从统一注册表获取文档（而非 BM25）
+        with self._registry_lock:
+            docs = list(self._document_registry)
+
         if not docs:
             with self._faiss_write_lock:
                 self.vector_db = None
@@ -887,8 +1020,12 @@ class DeepSeekApiRag:
 
     @staticmethod
     def _estimate_tokens(text: str) -> int:
-        """粗略估算中文文本的 token 数（约 1.5 字符/token）"""
-        return max(1, len(text) * 2 // 3)
+        """估算文本 token 数（区分中英文）"""
+        if not text:
+            return 1
+        ascii_count = sum(1 for c in text if ord(c) < 128)
+        non_ascii_count = len(text) - ascii_count
+        return max(1, int(ascii_count * 0.25 + non_ascii_count * 1.5))
 
     def generate_response_stream(
         self,
@@ -939,6 +1076,33 @@ class DeepSeekApiRag:
             logger.warning(f"文档检索失败，使用空上下文: {e}")
             retrieved_docs = []
 
+        # 置信度评估 — 判断检索结果是否足够回答用户问题
+        reranker_scores = [score for _, score in retrieved_docs]
+        confidence = self.confidence_evaluator.evaluate(query, retrieved_docs, reranker_scores)
+
+        # 无置信度：不调用 LLM，直接返回人工介入提示
+        if confidence["level"] == "none":
+            logger.info(f"检索置信度不足（{confidence['score']:.2f}），请求人工介入: {query[:50]}...")
+
+            no_confidence_response = self.response_strategy.get_no_confidence_response()
+
+            if conversation_id:
+                self.memory.add_message(conversation_id, "user", query)
+
+            def _no_confidence_stream():
+                yield _SimpleChunk(no_confidence_response)
+                yield _SimpleChunk("")
+
+            return {
+                "stream": _no_confidence_stream(),
+                "context": "",
+                "retrieved_documents": [doc[0] for doc in retrieved_docs],
+                "retrieved_documents_with_scores": retrieved_docs,
+                "analysis": analysis,
+                "conversation_id": conversation_id,
+                "confidence": confidence,
+            }
+
         # 构建上下文（带引用编号 + token 预算保护）
         MAX_CONTEXT_TOKENS = int(os.getenv("MAX_CONTEXT_TOKENS", "3000"))
         context_parts = []
@@ -964,13 +1128,27 @@ class DeepSeekApiRag:
         if conversation_id:
             self.memory.add_message(conversation_id, "user", query)
 
+        # 低置信度时在流式输出末尾追加免责声明
+        show_intervention_banner = confidence["level"] == "low"
+        disclaimer = self.response_strategy.get_disclaimer(confidence["reason"]) if show_intervention_banner else ""
+
+        def _stream_with_confidence():
+            full_response = ""
+            for chunk in response_stream:
+                full_response += chunk.content
+                yield chunk
+            if disclaimer:
+                yield _SimpleChunk(disclaimer)
+
         return {
-            "stream": response_stream,
+            "stream": _stream_with_confidence() if disclaimer else response_stream,
             "context": context,
             "retrieved_documents": [doc[0] for doc in retrieved_docs],
             "retrieved_documents_with_scores": [(doc, score) for doc, score in retrieved_docs],
             "analysis": analysis,
             "conversation_id": conversation_id,
+            "confidence": confidence,
+            "show_intervention_banner": show_intervention_banner,
         }
 
     def save_bot_response(self, conversation_id: str, response: str):

@@ -328,6 +328,45 @@ document.addEventListener('DOMContentLoaded', function() {
         wrapper.appendChild(downBtn);
     }
 
+    function showInterventionBanner(contentDiv, chatId) {
+        const wrapper = contentDiv.parentNode.querySelector('.message-actions');
+        if (!wrapper) return;
+        // 避免重复添加
+        if (wrapper.querySelector('.intervention-banner')) return;
+
+        const banner = document.createElement('div');
+        banner.className = 'intervention-banner';
+        banner.innerHTML = '<span class="intervention-icon">&#9878;</span>' +
+            '<span class="intervention-text">以上回答仅供参考，需要专业律师确认？</span>' +
+            '<button class="btn btn-accent btn-sm intervention-btn">转人工咨询</button>';
+
+        banner.querySelector('.intervention-btn').addEventListener('click', function() {
+            this.disabled = true;
+            this.textContent = '已提交';
+            const formData = new FormData();
+            formData.append('chat_id', chatId);
+            fetch('/api/intervention', {
+                method: 'POST',
+                headers: { 'X-CSRF-Token': getCsrfToken() },
+                body: formData
+            }).then(r => r.json()).then(data => {
+                if (data.success) {
+                    banner.querySelector('.intervention-text').textContent = '已提交人工咨询请求，律师将在24小时内回复';
+                } else {
+                    banner.querySelector('.intervention-text').textContent = '提交失败: ' + (data.error || '未知错误');
+                    this.disabled = false;
+                    this.textContent = '转人工咨询';
+                }
+            }).catch(() => {
+                banner.querySelector('.intervention-text').textContent = '提交失败，请稍后重试';
+                this.disabled = false;
+                this.textContent = '转人工咨询';
+            });
+        });
+
+        wrapper.appendChild(banner);
+    }
+
     // ── Send message ──
     function sendMessage(text) {
         const msg = text || userInput.value.trim();
@@ -467,6 +506,10 @@ document.addEventListener('DOMContentLoaded', function() {
                                 contentDiv.innerHTML = formatMessage(accumulated, 'bot');
                                 addCopyButton(contentDiv, accumulated);
                                 if (parsed.message_id) addFeedbackButtons(contentDiv, parsed.message_id, parsed.chat_id);
+                                // 低置信度时显示人工介入横幅
+                                if (parsed.show_intervention_banner) {
+                                    showInterventionBanner(contentDiv, parsed.chat_id);
+                                }
                                 finishStreaming();
                                 return;
                             }

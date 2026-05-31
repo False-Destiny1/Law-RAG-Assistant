@@ -1,5 +1,6 @@
 import logging
 import threading
+import time
 from collections import OrderedDict
 from datetime import datetime
 
@@ -13,24 +14,48 @@ SUMMARY_MAX_CHARS = 600  # 摘要最大字符数
 
 
 def _estimate_tokens(text: str) -> int:
-    """粗略估算中文文本的 token 数（约 1.5 字符/token）"""
-    return max(1, len(text) * 2 // 3)
+    """估算文本 token 数（区分中英文，比纯 len*2/3 更准确）"""
+    if not text:
+        return 1
+    ascii_count = sum(1 for c in text if ord(c) < 128)
+    non_ascii_count = len(text) - ascii_count
+    # 英文约 0.25 tokens/char, 中文约 1.5 tokens/char
+    return max(1, int(ascii_count * 0.25 + non_ascii_count * 1.5))
 
 
 class ConversationMemory:
     """对话记忆管理类（L1 内存缓存 + L2 Redis + L3 DB 持久化回退，LRU 淘汰 + 自动摘要压缩）"""
 
     MAX_CACHED_CONVERSATIONS = 500
+    IDLE_TIMEOUT = 3600  # 1小时无访问自动淘汰
 
     def __init__(self, max_history_turns: int = 5, db_session_factory=None, message_model=None):
         self.max_history_turns = max_history_turns
-        self.conversations = OrderedDict()
+        self.conversations = OrderedDict()  # chat_id -> (data_dict, last_access_time)
         self._lock = threading.Lock()
         # 依赖注入：DB session 工厂和 Message 模型（避免从 app.py 循环导入）
         self._db_session_factory = db_session_factory
         self._message_model = message_model
         # 摘要生成器（由 rag.py 注入，签名: (messages: list[dict]) -> str）
         self._summarizer = None
+
+    def _evict_idle(self):
+        """淘汰空闲超过 IDLE_TIMEOUT 的对话"""
+        now = time.time()
+        while self.conversations:
+            chat_id, (_, last_access) = next(iter(self.conversations.items()))
+            if now - last_access > self.IDLE_TIMEOUT:
+                self.conversations.popitem(last=False)
+                logger.debug(f"淘汰空闲对话: {chat_id}")
+            else:
+                break
+
+    def _touch(self, conversation_id: str):
+        """更新访问时间并移到末尾"""
+        if conversation_id in self.conversations:
+            data, _ = self.conversations[conversation_id]
+            self.conversations[conversation_id] = (data, time.time())
+            self.conversations.move_to_end(conversation_id)
 
     def set_summarizer(self, summarizer):
         """注入摘要生成器（签名: (messages: list[dict]) -> str）"""
@@ -68,12 +93,13 @@ class ConversationMemory:
         try:
             from law_assistant.redis_utils import cache_set_json
 
-            conversation = self.conversations.get(conversation_id)
-            if conversation:
+            entry = self.conversations.get(conversation_id)
+            if entry:
+                data = entry[0]
                 serializable = {
-                    "history": self._serialize_history(conversation["history"]),
-                    "summary": conversation.get("summary", ""),
-                    "created_at": conversation["created_at"].isoformat(),
+                    "history": self._serialize_history(data["history"]),
+                    "summary": data.get("summary", ""),
+                    "created_at": data["created_at"].isoformat(),
                 }
                 cache_set_json(f"conv:{conversation_id}", serializable, ttl=86400)
         except Exception:
@@ -85,53 +111,51 @@ class ConversationMemory:
         need_summarize = False
         split_at = 0
         with self._lock:
+            self._evict_idle()
+
             if conversation_id not in self.conversations:
                 # LRU 淘汰：超过上限时移除最旧的对话
                 while len(self.conversations) >= self.MAX_CACHED_CONVERSATIONS:
                     self.conversations.popitem(last=False)
-                self.conversations[conversation_id] = {"history": [], "summary": "", "created_at": datetime.now()}
+                data = {"history": [], "summary": "", "created_at": datetime.now()}
+                self.conversations[conversation_id] = (data, time.time())
             else:
-                # 移到末尾（最近使用）
-                self.conversations.move_to_end(conversation_id)
+                self._touch(conversation_id)
 
-            conversation = self.conversations[conversation_id]
+            conversation = self.conversations[conversation_id][0]
             conversation["history"].append({"role": role, "content": content, "timestamp": datetime.now()})
 
-            # 检查是否需要摘要压缩（基于 token 预算，不在锁内执行 LLM 调用）
+            # 检查是否需要摘要压缩
             total_tokens = sum(_estimate_tokens(m["content"]) for m in conversation["history"])
             if total_tokens > RECENT_TOKEN_BUDGET and self._summarizer and len(conversation["history"]) > 4:
                 split_at = len(conversation["history"]) // 2
                 if split_at % 2 != 0:
                     split_at += 1
-                # 只快照旧消息，不裁剪 history（裁剪推迟到摘要成功后）
                 need_summarize = True
 
-            # 兜底：保留最近N轮对话（防止极端情况）
+            # 兜底：保留最近N轮对话
             max_messages = self.max_history_turns * 2
             if len(conversation["history"]) > max_messages:
                 conversation["history"] = conversation["history"][-max_messages:]
 
         # Phase 2: 锁外执行网络/LLM 操作
         if need_summarize:
-            # 锁外快照旧消息（conversation 仍在内存中，GIL 保证引用有效）
-            old_messages = list(self.conversations.get(conversation_id, {}).get("history", [])[:split_at])
+            entry = self.conversations.get(conversation_id)
+            old_messages = list(entry[0]["history"][:split_at]) if entry else []
             if not old_messages:
                 self._write_to_redis(conversation_id)
                 return
             try:
                 new_summary = self._summarizer(old_messages)
-                # 锁内写回摘要 + 裁剪 history（重新读取 existing_summary 避免并发覆盖）
                 with self._lock:
                     if conversation_id in self.conversations:
-                        existing = self.conversations[conversation_id].get("summary", "")
+                        data = self.conversations[conversation_id][0]
+                        existing = data.get("summary", "")
                         combined = (existing + "\n" + new_summary) if existing else new_summary
                         if len(combined) > SUMMARY_MAX_CHARS:
-                            combined = combined[-SUMMARY_MAX_CHARS:]
-                        self.conversations[conversation_id]["summary"] = combined
-                        # 摘要成功，才裁剪旧消息
-                        self.conversations[conversation_id]["history"] = self.conversations[conversation_id]["history"][
-                            split_at:
-                        ]
+                            combined = combined[:SUMMARY_MAX_CHARS]
+                        data["summary"] = combined
+                        data["history"] = data["history"][split_at:]
                 logger.info(f"对话 {conversation_id} 摘要压缩: {len(old_messages)} 条消息 → 摘要")
             except Exception as e:
                 logger.warning(f"对话摘要失败，保留完整历史: {e}")
@@ -143,7 +167,8 @@ class ConversationMemory:
         # L1: 内存缓存
         with self._lock:
             if conversation_id in self.conversations:
-                return list(self.conversations[conversation_id]["history"])
+                self._touch(conversation_id)
+                return list(self.conversations[conversation_id][0]["history"])
 
         # L2: Redis
         try:
@@ -153,15 +178,12 @@ class ConversationMemory:
             if cached and "history" in cached:
                 history = self._deserialize_history(cached["history"])
                 summary = cached.get("summary", "")
-                # 回填 L1（放在末尾，标记为最近使用）
                 with self._lock:
+                    self._evict_idle()
                     if len(self.conversations) >= self.MAX_CACHED_CONVERSATIONS:
                         self.conversations.popitem(last=False)
-                    self.conversations[conversation_id] = {
-                        "history": history,
-                        "summary": summary,
-                        "created_at": datetime.now(),
-                    }
+                    data = {"history": history, "summary": summary, "created_at": datetime.now()}
+                    self.conversations[conversation_id] = (data, time.time())
                 return history
         except Exception:
             pass
@@ -175,11 +197,12 @@ class ConversationMemory:
         self.get_recent_history(conversation_id)
 
         with self._lock:
-            conversation = self.conversations.get(conversation_id)
-            if not conversation:
+            entry = self.conversations.get(conversation_id)
+            if not entry:
                 return "无对话历史"
-            summary = conversation.get("summary", "")
-            history = list(conversation["history"])
+            data = entry[0]
+            summary = data.get("summary", "")
+            history = list(data["history"])
 
         if not history and not summary:
             return "无对话历史"
@@ -221,6 +244,7 @@ class ConversationMemory:
         with self._lock:
             self.conversations.pop(conversation_id, None)
         # 同步清除 Redis
+        # 同步清除 Redis
         try:
             from law_assistant.redis_utils import cache_delete
 
@@ -252,7 +276,9 @@ class ConversationMemory:
             history = [{"role": msg.role, "content": msg.content, "timestamp": msg.created_at} for msg in messages]
 
             with self._lock:
-                self.conversations[conversation_id] = {"history": history, "created_at": datetime.now()}
+                self._evict_idle()
+                data = {"history": history, "created_at": datetime.now()}
+                self.conversations[conversation_id] = (data, time.time())
                 self._write_to_redis(conversation_id)
 
             logger.info(f"从DB加载对话历史: {conversation_id}, {len(history)} 条消息")

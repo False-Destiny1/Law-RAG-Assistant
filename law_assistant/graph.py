@@ -327,7 +327,7 @@ class LegalKnowledgeGraph:
     # ─── 图谱构建 ──────────────────────────────────────────
 
     def build_from_text(self, content: str, law_name: str = None) -> dict[str, int]:
-        """从一篇法律文本构建图谱节点和关系，返回统计"""
+        """从一篇法律文本构建图谱节点和关系（批量操作，返回统计）"""
         if not self.is_available:
             return {"laws": 0, "chapters": 0, "articles": 0, "citations": 0, "concepts": 0}
 
@@ -339,81 +339,103 @@ class LegalKnowledgeGraph:
 
         stats = {"laws": 0, "chapters": 0, "articles": 0, "citations": 0, "concepts": 0}
 
+        # 预计算每个条文所属章节
+        chapter_positions = [(ch["number"], content.find(ch["number"])) for ch in chapters]
+
         with self._driver.session(database=self._database) as session:
             # 1. 创建 Law 节点
+            full_name = f"中华人民共和国{law_name}" if "中华人民共和国" not in law_name else law_name
             session.run(
                 "MERGE (l:Law {name: $name}) SET l.full_name = $full_name, l.category = $category",
-                name=law_name,
-                full_name=f"中华人民共和国{law_name}" if "中华人民共和国" not in law_name else law_name,
-                category=category,
+                name=law_name, full_name=full_name, category=category,
             )
             stats["laws"] = 1
 
-            # 2. 创建 Chapter 节点
-            for ch in chapters:
+            # 2. 批量创建 Chapter 节点
+            if chapters:
+                chapter_params = [{"law": law_name, "num": ch["number"], "title": ch["title"]} for ch in chapters]
                 session.run(
-                    "MERGE (ch:Chapter {law_name: $law, number: $num}) "
-                    "SET ch.title = $title "
-                    "WITH ch "
-                    "MATCH (l:Law {name: $law}) "
-                    "MERGE (l)-[:HAS_CHAPTER]->(ch)",
-                    law=law_name,
-                    num=ch["number"],
-                    title=ch["title"],
+                    "UNWIND $chapters AS ch "
+                    "MERGE (c:Chapter {law_name: ch.law, number: ch.num}) "
+                    "SET c.title = ch.title "
+                    "WITH c "
+                    "MATCH (l:Law {name: ch.law}) "
+                    "MERGE (l)-[:HAS_CHAPTER]->(c)",
+                    chapters=chapter_params,
                 )
-                stats["chapters"] += 1
+                stats["chapters"] = len(chapters)
 
-            # 3. 创建 Article 节点 + 关系
-            current_chapter = ""
+            # 3. 批量创建 Article 节点 + 关系
+            all_citations = []
+            all_concepts = []
+            article_params = []
+
             for art in articles:
-                # 确定所属章节（最后一个在当前条文之前的章节）
-                for ch in chapters:
-                    if content.find(ch["number"]) < art["start"]:
-                        current_chapter = ch["number"]
+                current_chapter = ""
+                art_pos = art.get("start", 0)
+                for ch_num, ch_pos in chapter_positions:
+                    if ch_pos < art_pos:
+                        current_chapter = ch_num
 
-                session.run(
-                    "MERGE (a:Article {law_name: $law, number: $num}) "
-                    "SET a.text = $text, a.chapter = $chapter "
-                    "WITH a "
-                    "MATCH (l:Law {name: $law}) "
-                    "MERGE (l)-[:CONTAINS]->(a) "
-                    "FOREACH (_ IN CASE WHEN $chapter <> '' THEN [1] ELSE [] END | "
-                    "  MERGE (ch:Chapter {law_name: $law, number: $chapter}) "
-                    "  MERGE (ch)-[:CONTAINS]->(a))",
-                    law=law_name,
-                    num=art["number"],
-                    text=art["text"][:2000],  # 截断超长条文
-                    chapter=current_chapter,
-                )
-                stats["articles"] += 1
+                article_params.append({
+                    "law": law_name,
+                    "num": art["number"],
+                    "text": art["text"][:2000],
+                    "chapter": current_chapter,
+                })
 
-                # 4. 引用关系
+                # 收集引用和概念
                 citations = self.extract_citations(art["text"], law_name)
                 for cite in citations:
-                    session.run(
-                        "MATCH (a:Article {law_name: $law, number: $num}) "
-                        "MATCH (cited:Article {law_name: $cited_law, number: $cited_num}) "
-                        "MERGE (a)-[:CITES]->(cited)",
-                        law=law_name,
-                        num=art["number"],
-                        cited_law=cite["cited_law"],
-                        cited_num=cite["cited_article"],
-                    )
-                    stats["citations"] += 1
+                    all_citations.append({
+                        "law": law_name, "num": art["number"],
+                        "cited_law": cite["cited_law"], "cited_num": cite["cited_article"],
+                    })
 
-                # 5. 概念关系
                 concepts = self.extract_concepts(art["text"])
                 for concept in concepts:
-                    session.run(
-                        "MERGE (c:Concept {name: $name}) "
-                        "WITH c "
-                        "MATCH (a:Article {law_name: $law, number: $num}) "
-                        "MERGE (a)-[:DEFINES]->(c)",
-                        name=concept,
-                        law=law_name,
-                        num=art["number"],
-                    )
-                    stats["concepts"] += 1
+                    all_concepts.append({
+                        "name": concept, "law": law_name, "num": art["number"],
+                    })
+
+            # 批量写入条文
+            if article_params:
+                session.run(
+                    "UNWIND $articles AS art "
+                    "MERGE (a:Article {law_name: art.law, number: art.num}) "
+                    "SET a.text = art.text, a.chapter = art.chapter "
+                    "WITH a "
+                    "MATCH (l:Law {name: art.law}) "
+                    "MERGE (l)-[:CONTAINS]->(a) "
+                    "FOREACH (_ IN CASE WHEN art.chapter <> '' THEN [1] ELSE [] END | "
+                    "  MERGE (ch:Chapter {law_name: art.law, number: art.chapter}) "
+                    "  MERGE (ch)-[:CONTAINS]->(a))",
+                    articles=article_params,
+                )
+                stats["articles"] = len(article_params)
+
+            # 4. 批量创建引用关系
+            if all_citations:
+                session.run(
+                    "UNWIND $citations AS cite "
+                    "MATCH (a:Article {law_name: cite.law, number: cite.num}) "
+                    "MATCH (cited:Article {law_name: cite.cited_law, number: cite.cited_num}) "
+                    "MERGE (a)-[:CITES]->(cited)",
+                    citations=all_citations,
+                )
+                stats["citations"] = len(all_citations)
+
+            # 5. 批量创建概念关系
+            if all_concepts:
+                session.run(
+                    "UNWIND $concepts AS con "
+                    "MERGE (c:Concept {name: con.name}) "
+                    "WITH c "
+                    "MATCH (a:Article {law_name: con.law, number: con.num}) "
+                    "MERGE (a)-[:DEFINES]->(c)",
+                    concepts=all_concepts,
+                )
+                stats["concepts"] = len(all_concepts)
 
         logger.info(
             f"图谱构建完成 [{law_name}]: "

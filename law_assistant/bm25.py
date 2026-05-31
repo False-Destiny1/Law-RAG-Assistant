@@ -272,28 +272,36 @@ class BM25Retriever:
 
     def remove_documents(self, target_texts: list[str]):
         """从索引中移除包含指定文本的文档（线程安全）"""
+        target_set = set(target_texts)
+
+        # Phase 1: 锁内快速过滤（不 tokenize）
         with self._lock:
             if not self.documents:
                 return
 
-            # 先处理待处理文档
             if self.pending_documents:
-                self.pending_documents = [d for d in self.pending_documents if d not in target_texts]
+                self.pending_documents = [d for d in self.pending_documents if d not in target_set]
 
-            # 从已索引文档中移除
-            target_set = set(target_texts)
             new_documents = [d for d in self.documents if d not in target_set]
             removed_count = len(self.documents) - len(new_documents)
 
-            if removed_count > 0:
-                self.documents = new_documents
-                # 重建索引
-                if self.documents:
-                    self.tokenized_docs = [self.chinese_tokenize(doc) for doc in self.documents]
-                    self.bm25 = BM25Okapi(self.tokenized_docs)
-                else:
-                    self.bm25 = None
-                    self.tokenized_docs = []
-                logger.info(f"BM25索引已移除 {removed_count} 个文档，剩余 {len(self.documents)} 个")
-            else:
+            if removed_count == 0:
                 logger.info("BM25索引中未找到需要移除的文档")
+                return
+
+            self.documents = new_documents
+
+        # Phase 2: 锁外做 CPU 密集的 tokenize + 索引构建
+        if new_documents:
+            tokenized_docs = [self.chinese_tokenize(doc) for doc in new_documents]
+            bm25 = BM25Okapi(tokenized_docs)
+        else:
+            tokenized_docs = []
+            bm25 = None
+
+        # Phase 3: 原子替换索引
+        with self._lock:
+            self.tokenized_docs = tokenized_docs
+            self.bm25 = bm25
+
+        logger.info(f"BM25索引已移除 {removed_count} 个文档，剩余 {len(new_documents)} 个")

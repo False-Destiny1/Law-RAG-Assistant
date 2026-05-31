@@ -16,7 +16,7 @@ from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text, create_engine
+from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String, Text, create_engine
 from sqlalchemy import text as _text
 from sqlalchemy.orm import Session, declarative_base, joinedload, relationship, sessionmaker, subqueryload
 
@@ -42,6 +42,53 @@ def _safe_int(value, default=None):
         return int(value)
     except (ValueError, TypeError):
         return default
+
+
+# MIME type validation via magic bytes (no external dependency)
+_MAGIC_BYTES = {
+    b"%PDF": "application/pdf",
+    b"PK\x03\x04": "application/zip",  # .docx is ZIP-based
+    b"\xff\xd8\xff": "image/jpeg",
+    b"\x89PNG": "image/png",
+    b"BM": "image/bmp",
+    b"II\x2a\x00": "image/tiff",
+    b"MM\x00\x2a": "image/tiff",
+}
+
+_EXT_TO_MIME = {
+    "pdf": "application/pdf",
+    "docx": "application/zip",
+    "txt": "text/plain",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "png": "image/png",
+    "bmp": "image/bmp",
+    "tiff": "image/tiff",
+}
+
+
+def _validate_file_magic(file_path: str, expected_ext: str) -> str | None:
+    """校验文件实际 MIME 类型是否匹配扩展名。返回错误信息，通过则返回 None。"""
+    try:
+        with open(file_path, "rb") as f:
+            header = f.read(16)
+    except OSError:
+        return "无法读取文件内容"
+
+    detected_mime = None
+    for magic, mime in _MAGIC_BYTES.items():
+        if header.startswith(magic):
+            detected_mime = mime
+            break
+
+    # TXT 没有 magic bytes，跳过校验
+    if expected_ext == "txt":
+        return None
+
+    expected_mime = _EXT_TO_MIME.get(expected_ext)
+    if detected_mime and expected_mime and detected_mime != expected_mime:
+        return f"文件内容与扩展名不匹配: 扩展名 .{expected_ext}，实际类型 {detected_mime}"
+    return None
 
 
 # ── App ──────────────────────────────────────────────────────────────
@@ -307,6 +354,37 @@ class MessageFeedback(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
+class InterventionRequest(Base):
+    __tablename__ = "intervention_request"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("user.id"), nullable=False)
+    chat_id = Column(Integer, ForeignKey("chat.id"), nullable=False)
+    original_query = Column(Text, nullable=False)
+    confidence_level = Column(String(20), nullable=False)  # high/low/none
+    confidence_score = Column(Float, nullable=False)
+    confidence_reason = Column(Text)
+    retrieved_doc_count = Column(Integer, default=0)
+    status = Column(String(20), nullable=False, default="pending")  # pending/assigned/completed
+    assigned_to = Column(Integer, ForeignKey("user.id"), nullable=True)
+    response = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, onupdate=lambda: datetime.now(timezone.utc))
+
+
+class KnowledgeGap(Base):
+    __tablename__ = "knowledge_gap"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    query = Column(Text, nullable=False)
+    confidence_level = Column(String(20))
+    confidence_reason = Column(Text)
+    user_id = Column(Integer, ForeignKey("user.id"), nullable=False)
+    frequency = Column(Integer, default=1)
+    status = Column(String(20), nullable=False, default="open")  # open/researched/added
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, onupdate=lambda: datetime.now(timezone.utc))
+
+
 Base.metadata.create_all(engine)
 # 确保索引存在（create_all 不会更新已存在的表）
 
@@ -316,6 +394,9 @@ _index_sqls = [
     "CREATE INDEX IF NOT EXISTS ix_kb_user ON knowledge_base (user_id)",
     "CREATE INDEX IF NOT EXISTS ix_doc_user_kb ON uploaded_document (user_id, knowledge_base_id)",
     "ALTER TABLE uploaded_document ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'completed'",
+    "CREATE INDEX IF NOT EXISTS ix_intervention_user ON intervention_request (user_id, status)",
+    "CREATE INDEX IF NOT EXISTS ix_intervention_status ON intervention_request (status, created_at)",
+    "CREATE INDEX IF NOT EXISTS ix_gap_status ON knowledge_gap (status, frequency)",
 ]
 with engine.connect() as _conn:
     for _sql in _index_sqls:
@@ -485,6 +566,11 @@ def initialize_vector_database():
             logger.info("无文档可构建索引")
     else:
         logger.info("向量数据库和 BM25 索引均已存在，跳过初始化构建")
+        # 从 BM25 已有文档填充文档注册表（确保删除后重建一致性）
+        if rag_model.bm25_retriever.documents:
+            with rag_model._registry_lock:
+                rag_model._document_registry = list(rag_model.bm25_retriever.documents)
+            logger.info(f"已从 BM25 加载 {len(rag_model._document_registry)} 个文档到注册表")
 
 
 initialize_vector_database()
@@ -803,6 +889,13 @@ async def upload_submit(
     with open(file_path, "wb") as f:
         f.write(content)
 
+    # MIME 校验：检查文件实际内容是否匹配扩展名
+    mime_error = _validate_file_magic(file_path, file_ext)
+    if mime_error:
+        with suppress(Exception):
+            os.remove(file_path)
+        return JSONResponse({"error": mime_error}, status_code=400)
+
     new_doc = UploadedDocument(
         user_id=user.id,
         knowledge_base_id=_safe_int(knowledge_base_id),
@@ -875,14 +968,38 @@ def reprocess_document(
 
 
 def _remove_document_from_texts(texts: list[str], kb_id: int, filename: str):
-    """后台任务：从 BM25 索引中移除已删除文档的文本块"""
+    """后台任务：从 BM25 索引和文档注册表中移除已删除文档的文本块"""
     try:
         rag_model.bm25_retriever.remove_documents(texts)
         rag_model.bm25_retriever.save_index()
+        rag_model.remove_from_registry(texts)
         rag_model.invalidate_kb_cache(kb_id)
         logger.info(f"已从BM25索引中移除文档 {filename} 的 {len(texts)} 个文本块")
     except Exception as e:
         logger.warning(f"从索引中移除文档失败: {e}")
+
+
+def _track_knowledge_gap(db: Session, user_id: int, query: str, confidence: dict):
+    """记录知识库缺口（相同前缀的查询合并计数）"""
+    try:
+        query_prefix = query[:50]
+        existing = db.query(KnowledgeGap).filter(
+            KnowledgeGap.query.like(f"%{query_prefix}%"),
+            KnowledgeGap.status == "open",
+        ).first()
+        if existing:
+            existing.frequency += 1
+        else:
+            db.add(KnowledgeGap(
+                query=query,
+                confidence_level=confidence.get("level", "none"),
+                confidence_reason=confidence.get("reason", ""),
+                user_id=user_id,
+            ))
+        db.commit()
+    except Exception as e:
+        logger.warning(f"记录知识库缺口失败: {e}")
+        db.rollback()
 
 
 # ── API routes ───────────────────────────────────────────────────────
@@ -1075,9 +1192,120 @@ def submit_feedback(
     return {"success": True, "rating": rating}
 
 
+@app.post("/api/intervention")
+def create_intervention(
+    chat_id: int = Form(...),
+    query: str = Form(""),
+    user: User = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    """创建人工法律咨询介入请求"""
+    chat_obj = db.query(Chat).filter(Chat.id == chat_id, Chat.user_id == user.id).first()
+    if not chat_obj:
+        return JSONResponse({"error": "对话不存在"}, status_code=404)
+
+    # 取最近一条用户消息作为原始问题
+    if not query:
+        last_msg = (
+            db.query(Message)
+            .filter(Message.chat_id == chat_id, Message.role == "user")
+            .order_by(Message.created_at.desc())
+            .first()
+        )
+        query = last_msg.content if last_msg else ""
+
+    intervention = InterventionRequest(
+        user_id=user.id,
+        chat_id=chat_id,
+        original_query=query,
+        confidence_level="low",
+        confidence_score=0.0,
+        confidence_reason="用户主动请求人工介入",
+        status="pending",
+    )
+    db.add(intervention)
+    db.commit()
+    db.refresh(intervention)
+
+    logger.info(f"人工介入请求已创建: user={user.id}, chat={chat_id}, id={intervention.id}")
+    return {"success": True, "intervention_id": intervention.id}
+
+
+@app.get("/api/interventions")
+def list_interventions(user: User = Depends(require_user), db: Session = Depends(get_db)):
+    """获取当前用户的介入请求列表"""
+    interventions = (
+        db.query(InterventionRequest)
+        .filter(InterventionRequest.user_id == user.id)
+        .order_by(InterventionRequest.created_at.desc())
+        .limit(20)
+        .all()
+    )
+    return [
+        {
+            "id": iv.id,
+            "original_query": iv.original_query[:100],
+            "status": iv.status,
+            "response": iv.response,
+            "created_at": iv.created_at.isoformat(),
+        }
+        for iv in interventions
+    ]
+
+
+@app.get("/api/admin/knowledge-gaps")
+def list_knowledge_gaps(user: User = Depends(require_user), db: Session = Depends(get_db)):
+    """管理员查看知识库缺口（按频率排序）"""
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    gaps = (
+        db.query(KnowledgeGap)
+        .filter(KnowledgeGap.status == "open")
+        .order_by(KnowledgeGap.frequency.desc())
+        .limit(50)
+        .all()
+    )
+    return [
+        {
+            "id": gap.id,
+            "query": gap.query,
+            "frequency": gap.frequency,
+            "confidence_level": gap.confidence_level,
+            "created_at": gap.created_at.isoformat(),
+        }
+        for gap in gaps
+    ]
+
+
+@app.put("/api/admin/knowledge-gaps/{gap_id}")
+def update_knowledge_gap(
+    gap_id: int,
+    status: str = Form(...),
+    notes: str = Form(""),
+    user: User = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    """管理员更新知识库缺口状态"""
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    if status not in ("open", "researched", "added"):
+        return JSONResponse({"error": "状态无效"}, status_code=400)
+    gap = db.query(KnowledgeGap).filter(KnowledgeGap.id == gap_id).first()
+    if not gap:
+        return JSONResponse({"error": "缺口记录不存在"}, status_code=404)
+    gap.status = status
+    gap.notes = notes
+    db.commit()
+    return {"success": True}
+
+
 # ── Streaming chat ──────────────────────────────────────────────────
 @app.api_route("/ask_stream", methods=["GET", "POST"])
 async def ask_stream(request: Request, user: User = Depends(require_user), db: Session = Depends(get_db)):
+    from law_assistant.metrics import metrics
+    import time as _time
+    request_start = _time.time()
+
     if request.method == "GET":
         params = request.query_params
         user_input = params.get("user_input", "")
@@ -1120,6 +1348,11 @@ async def ask_stream(request: Request, user: User = Depends(require_user), db: S
         user_input, conversation_id=conversation_id, knowledge_base_id=kb_id_int, db_session=db
     )
 
+    # 知识库缺口追踪（低/无置信度时记录）
+    confidence = result.get("confidence", {})
+    if confidence.get("level") in ("low", "none"):
+        _track_knowledge_gap(db, user.id, user_input, confidence)
+
     # Save user message and update chat timestamp
     try:
         msg = Message(chat_id=int(chat_id), role="user", content=user_input)
@@ -1154,7 +1387,19 @@ async def ask_stream(request: Request, user: User = Depends(require_user), db: S
             finally:
                 db2.close()
 
-            yield f'data: {{"done": true, "message_id": {bot_msg_id}, "chat_id": {chat_id}}}\n\n'
+            conf_level = confidence.get("level", "high")
+            show_banner = str(result.get("show_intervention_banner", False)).lower()
+            done_payload = (
+                f'{{"done": true, "message_id": {bot_msg_id}, "chat_id": {chat_id}, '
+                f'"confidence_level": "{conf_level}", "show_intervention_banner": {show_banner}}}'
+            )
+            yield f"data: {done_payload}\n\n"
+
+            # Metrics: track response time and confidence
+            elapsed = _time.time() - request_start
+            metrics.inc("ask_stream_total")
+            metrics.observe("ask_stream_duration_seconds", elapsed)
+            metrics.inc(f"confidence_{conf_level}")
         except Exception as e:
             logger.error(f"生成回复时出现错误: {e}", exc_info=True)
             error_msg = "抱歉，生成回复时出现错误，请稍后重试"
@@ -1197,6 +1442,14 @@ def health_check():
         pass
     status = "healthy" if (db_ok and rag_model is not None) else "degraded"
     return {"status": status, "database": db_ok, "redis": redis_ok, "rag_ready": rag_model is not None}
+
+
+@app.get("/metrics")
+def metrics_endpoint():
+    from law_assistant.metrics import metrics
+    from fastapi.responses import PlainTextResponse
+
+    return PlainTextResponse(metrics.render(), media_type="text/plain")
 
 
 if __name__ == "__main__":
