@@ -1,0 +1,42 @@
+{
+  "full": [
+    {
+      "id": "M1",
+      "category": "retrieval_multi",
+      "question": "离婚时财产怎么分，孩子抚养权归谁？",
+      "precision": 0.0,
+      "recall": 0.0,
+      "hit_rate": 0.0
+    }
+  ],
+  "vector_only": [
+    {
+      "id": "M1",
+      "category": "retrieval_multi",
+      "question": "离婚时财产怎么分，孩子抚养权归谁？",
+      "precision": 0.0,
+      "recall": 0.0,
+      "hit_rate": 0.0
+    }
+  ],
+  "bm25_only": [
+    {
+      "id": "M1",
+      "category": "retrieval_multi",
+      "question": "离婚时财产怎么分，孩子抚养权归谁？",
+      "precision": 0.0,
+      "recall": 0.0,
+      "hit_rate": 0.0
+    }
+  ],
+  "graph_only": [
+    {
+      "id": "M1",
+      "category": "retrieval_multi",
+      "question": "离婚时财产怎么分，孩子抚养权归谁？",
+      "precision": 0.0,
+      "recall": 0.0,
+      "hit_rate": 0.0
+    }
+  ]
+}

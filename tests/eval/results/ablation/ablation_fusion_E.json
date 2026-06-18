@@ -1,0 +1,74 @@
+{
+  "full": [
+    {
+      "id": "T1",
+      "category": "multi_turn",
+      "question": "那试用期呢？",
+      "precision": 0.1111111111111111,
+      "recall": 0.5,
+      "hit_rate": 1.0
+    },
+    {
+      "id": "T2",
+      "category": "multi_turn",
+      "question": "具体要赔偿多少钱？",
+      "precision": 0,
+      "recall": 0,
+      "hit_rate": 0
+    }
+  ],
+  "vector_only": [
+    {
+      "id": "T1",
+      "category": "multi_turn",
+      "question": "那试用期呢？",
+      "precision": 0.125,
+      "recall": 0.5,
+      "hit_rate": 1.0
+    },
+    {
+      "id": "T2",
+      "category": "multi_turn",
+      "question": "具体要赔偿多少钱？",
+      "precision": 0.0,
+      "recall": 0.0,
+      "hit_rate": 0.0
+    }
+  ],
+  "bm25_only": [
+    {
+      "id": "T1",
+      "category": "multi_turn",
+      "question": "那试用期呢？",
+      "precision": 0.1111111111111111,
+      "recall": 0.5,
+      "hit_rate": 1.0
+    },
+    {
+      "id": "T2",
+      "category": "multi_turn",
+      "question": "具体要赔偿多少钱？",
+      "precision": 0.0,
+      "recall": 0.0,
+      "hit_rate": 0.0
+    }
+  ],
+  "graph_only": [
+    {
+      "id": "T1",
+      "category": "multi_turn",
+      "question": "那试用期呢？",
+      "precision": 0,
+      "recall": 0,
+      "hit_rate": 0
+    },
+    {
+      "id": "T2",
+      "category": "multi_turn",
+      "question": "具体要赔偿多少钱？",
+      "precision": 0,
+      "recall": 0,
+      "hit_rate": 0
+    }
+  ]
+}

@@ -1,0 +1,170 @@
+{
+  "full": [
+    {
+      "id": "R1",
+      "category": "retrieval_direct",
+      "question": "劳动合同解除的条件有哪些？",
+      "precision": 0.3,
+      "recall": 1.0,
+      "hit_rate": 1.0
+    },
+    {
+      "id": "R2",
+      "category": "retrieval_direct",
+      "question": "民法典中关于离婚财产分割的规定是什么？",
+      "precision": 0.0,
+      "recall": 0.0,
+      "hit_rate": 0.0
+    },
+    {
+      "id": "R3",
+      "category": "retrieval_direct",
+      "question": "什么是不可抗力？",
+      "precision": 0.375,
+      "recall": 0.5,
+      "hit_rate": 1.0
+    },
+    {
+      "id": "R4",
+      "category": "retrieval_direct",
+      "question": "正当防卫的条件是什么？",
+      "precision": 0.3333333333333333,
+      "recall": 0.5,
+      "hit_rate": 1.0
+    },
+    {
+      "id": "R5",
+      "category": "retrieval_direct",
+      "question": "遗产继承的顺序是什么？",
+      "precision": 0.2,
+      "recall": 0.6666666666666666,
+      "hit_rate": 1.0
+    }
+  ],
+  "vector_only": [
+    {
+      "id": "R1",
+      "category": "retrieval_direct",
+      "question": "劳动合同解除的条件有哪些？",
+      "precision": 0.2,
+      "recall": 0.6666666666666666,
+      "hit_rate": 1.0
+    },
+    {
+      "id": "R2",
+      "category": "retrieval_direct",
+      "question": "民法典中关于离婚财产分割的规定是什么？",
+      "precision": 0.0,
+      "recall": 0.0,
+      "hit_rate": 0.0
+    },
+    {
+      "id": "R3",
+      "category": "retrieval_direct",
+      "question": "什么是不可抗力？",
+      "precision": 0.5,
+      "recall": 0.5,
+      "hit_rate": 1.0
+    },
+    {
+      "id": "R4",
+      "category": "retrieval_direct",
+      "question": "正当防卫的条件是什么？",
+      "precision": 0.5,
+      "recall": 0.5,
+      "hit_rate": 1.0
+    },
+    {
+      "id": "R5",
+      "category": "retrieval_direct",
+      "question": "遗产继承的顺序是什么？",
+      "precision": 0.0,
+      "recall": 0.0,
+      "hit_rate": 0.0
+    }
+  ],
+  "bm25_only": [
+    {
+      "id": "R1",
+      "category": "retrieval_direct",
+      "question": "劳动合同解除的条件有哪些？",
+      "precision": 0.2857142857142857,
+      "recall": 0.6666666666666666,
+      "hit_rate": 1.0
+    },
+    {
+      "id": "R2",
+      "category": "retrieval_direct",
+      "question": "民法典中关于离婚财产分割的规定是什么？",
+      "precision": 0.0,
+      "recall": 0.0,
+      "hit_rate": 0.0
+    },
+    {
+      "id": "R3",
+      "category": "retrieval_direct",
+      "question": "什么是不可抗力？",
+      "precision": 0.2,
+      "recall": 0.5,
+      "hit_rate": 1.0
+    },
+    {
+      "id": "R4",
+      "category": "retrieval_direct",
+      "question": "正当防卫的条件是什么？",
+      "precision": 0,
+      "recall": 0,
+      "hit_rate": 0
+    },
+    {
+      "id": "R5",
+      "category": "retrieval_direct",
+      "question": "遗产继承的顺序是什么？",
+      "precision": 0.1,
+      "recall": 0.6666666666666666,
+      "hit_rate": 1.0
+    }
+  ],
+  "graph_only": [
+    {
+      "id": "R1",
+      "category": "retrieval_direct",
+      "question": "劳动合同解除的条件有哪些？",
+      "precision": 0.0,
+      "recall": 0.0,
+      "hit_rate": 0.0
+    },
+    {
+      "id": "R2",
+      "category": "retrieval_direct",
+      "question": "民法典中关于离婚财产分割的规定是什么？",
+      "precision": 0,
+      "recall": 0,
+      "hit_rate": 0
+    },
+    {
+      "id": "R3",
+      "category": "retrieval_direct",
+      "question": "什么是不可抗力？",
+      "precision": 0.0,
+      "recall": 0.0,
+      "hit_rate": 0.0
+    },
+    {
+      "id": "R4",
+      "category": "retrieval_direct",
+      "question": "正当防卫的条件是什么？",
+      "precision": 0.0,
+      "recall": 0.0,
+      "hit_rate": 0.0
+    },
+    {
+      "id": "R5",
+      "category": "retrieval_direct",
+      "question": "遗产继承的顺序是什么？",
+      "precision": 0.0,
+      "recall": 0.0,
+      "hit_rate": 0.0
+    }
+  ]
+}

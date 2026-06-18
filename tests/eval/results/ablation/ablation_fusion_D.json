@@ -1,0 +1,74 @@
+{
+  "full": [
+    {
+      "id": "D1",
+      "category": "retrieval_cold",
+      "question": "深海海底资源勘探有什么法律规定",
+      "precision": 1.0,
+      "recall": 1.0,
+      "hit_rate": 1.0
+    },
+    {
+      "id": "D2",
+      "category": "retrieval_cold",
+      "question": "个人信息保护法对企业处理用户数据有什么要求",
+      "precision": 0.1,
+      "recall": 0.3333333333333333,
+      "hit_rate": 1.0
+    }
+  ],
+  "vector_only": [
+    {
+      "id": "D1",
+      "category": "retrieval_cold",
+      "question": "深海海底资源勘探有什么法律规定",
+      "precision": 1.0,
+      "recall": 1.0,
+      "hit_rate": 1.0
+    },
+    {
+      "id": "D2",
+      "category": "retrieval_cold",
+      "question": "个人信息保护法对企业处理用户数据有什么要求",
+      "precision": 0.1,
+      "recall": 0.3333333333333333,
+      "hit_rate": 1.0
+    }
+  ],
+  "bm25_only": [
+    {
+      "id": "D1",
+      "category": "retrieval_cold",
+      "question": "深海海底资源勘探有什么法律规定",
+      "precision": 1.0,
+      "recall": 1.0,
+      "hit_rate": 1.0
+    },
+    {
+      "id": "D2",
+      "category": "retrieval_cold",
+      "question": "个人信息保护法对企业处理用户数据有什么要求",
+      "precision": 0.0,
+      "recall": 0.0,
+      "hit_rate": 0.0
+    }
+  ],
+  "graph_only": [
+    {
+      "id": "D1",
+      "category": "retrieval_cold",
+      "question": "深海海底资源勘探有什么法律规定",
+      "precision": 0,
+      "recall": 0,
+      "hit_rate": 0
+    },
+    {
+      "id": "D2",
+      "category": "retrieval_cold",
+      "question": "个人信息保护法对企业处理用户数据有什么要求",
+      "precision": 1.0,
+      "recall": 0.3333333333333333,
+      "hit_rate": 1.0
+    }
+  ]
+}
