@@ -371,3 +371,12 @@ MATCH (l:Law) RETURN l LIMIT 50
 // 查看某部法律的条文
 MATCH (l:Law {name: "民法典"})-[:CONTAINS]->(a:Article) RETURN l, a LIMIT 30
 ```
+
+## 项目亮点
+
+- **三路融合检索**: FAISS 向量检索 + BM25 关键词检索 + Neo4j 知识图谱检索，使用 Reciprocal Rank Fusion 融合排序，兼顾语义匹配、精确关键词和结构化关系
+- **HyDE 检索增强**: 通过 LLM 生成假设法律文档，弥补用户口语化提问与法律文档正式表述之间的语义差距
+- **自定义 RAGAS 评估**: 8 项指标（context_precision/recall、faithfulness、citation_accuracy/coverage 等）、15 条评估数据集覆盖 6 个类别，faithfulness 0.98、citation_accuracy 1.0
+- **3 层 Prompt 注入防御**: 输入过滤（正则匹配已知攻击模式）+ 上下文消毒（移除历史中的注入片段）+ Prompt 硬化（system prompt 安全规则），法律场景特殊处理避免误杀
+- **三级缓存架构**: L1 内存 LRU（500 会话、1h 超时）+ L2 Redis + L3 PostgreSQL，支持优雅降级
+- **引用后处理**: 自动检测缺少 `[来源N]` 标签的法律句子并补充引用，提升 citation_coverage

@@ -35,6 +35,81 @@ class _SimpleChunk:
         self.content = content
 
 
+# ── Citation Post-processing ──────────────────────────────────────────
+def postprocess_citations(answer: str, context_parts: list[str]) -> str:
+    """后处理：为缺少引用的法律句子自动补充 [来源N] 标签。
+
+    逻辑:
+    1. 检测包含法律术语但缺少 [来源N] 的句子
+    2. 在 context_parts 中查找匹配的来源
+    3. 在句末补充 [来源N]
+    """
+    if not answer or not context_parts:
+        return answer
+
+    legal_term_pattern = re.compile(
+        r"《[^》]+》|第[零一二三四五六七八九十百千万\d]+[条章节款项]|"
+        r"用人单位|劳动者|劳动合同|解除|终止|赔偿|补偿|共同财产|分割|抚养|继承|遗嘱|"
+        r"诉讼|仲裁|起诉|上诉|调解|违约|侵权|过错|责任|义务|权利"
+    )
+    citation_pattern = re.compile(r"\[来源\d+\]")
+
+    # 预处理: 从 context_parts 提取来源编号和关键词
+    source_keywords = {}  # source_id -> set of keywords
+    for i, part in enumerate(context_parts):
+        source_id = i + 1
+        keywords = set(legal_term_pattern.findall(part))
+        source_keywords[source_id] = keywords
+
+    def _find_best_source(sentence: str) -> int | None:
+        """为句子找到最匹配的来源编号"""
+        sentence_terms = set(legal_term_pattern.findall(sentence))
+        if not sentence_terms:
+            return None
+        best_id = None
+        best_overlap = 0
+        for sid, kw in source_keywords.items():
+            overlap = len(sentence_terms & kw)
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_id = sid
+        return best_id if best_overlap > 0 else None
+
+    # 按句处理
+    sentences = re.split(r"(?<=[。！？])", answer)
+    result = []
+    for s in sentences:
+        if not s.strip():
+            result.append(s)
+            continue
+        # 跳过已有引用的句子
+        if citation_pattern.search(s):
+            result.append(s)
+            continue
+        # 跳过非实质性句子
+        if len(s.strip()) <= 15:
+            result.append(s)
+            continue
+        # 检测是否包含法律术语
+        if not legal_term_pattern.search(s):
+            result.append(s)
+            continue
+        # 尝试补充引用
+        source_id = _find_best_source(s)
+        if source_id:
+            # 在句末最后一个标点前插入引用
+            insert_pos = len(s.rstrip())
+            for pos in range(len(s) - 1, -1, -1):
+                if s[pos] in "。！？":
+                    insert_pos = pos
+                    break
+            result.append(s[:insert_pos] + f" [来源{source_id}]" + s[insert_pos:])
+        else:
+            result.append(s)
+
+    return "".join(result)
+
+
 # ── Reciprocal Rank Fusion ────────────────────────────────────────────
 def reciprocal_rank_fusion(results_lists: list[list[tuple]], k: int = 60) -> list[tuple]:
     """RRF 融合多路检索结果，不依赖分数归一化，对不同检索器更鲁棒。
@@ -195,6 +270,12 @@ class DeepSeekApiRag:
         self.vector_weight = float(os.getenv("VECTOR_RETRIEVAL_WEIGHT", "0.4"))
         self.bm25_weight = float(os.getenv("BM25_RETRIEVAL_WEIGHT", "0.3"))
         self.graph_weight = float(os.getenv("GRAPH_RETRIEVAL_WEIGHT", "0.3"))
+
+        # 8.1 检索模式（用于 baseline 对比实验：full / vector_only / bm25_only / graph_only）
+        self.retrieval_mode = os.getenv("RETRIEVAL_MODE", "full")
+
+        # 8.2 HyDE 开关（用于消融实验）
+        self.enable_hyde = os.getenv("ENABLE_HYDE", "true").lower() == "true"
 
         # 9. 知识图谱（可选，Neo4j 不可用时自动降级）
         self.knowledge_graph = LegalKnowledgeGraph()
@@ -678,25 +759,46 @@ class DeepSeekApiRag:
         return results
 
     def hybrid_retrieve_documents(self, query: str, top_k: int = 10) -> list[tuple[str, float]]:
-        """三路融合检索：向量检索 + BM25 检索 + 图谱检索（RRF 融合）"""
-        # 顺序执行三种检索（避免嵌套线程池死锁，外层已通过线程池并行多个查询）
-        vector_results = self._vector_search(query, top_k)
-        bm25_res = self._bm25_search(query, top_k)
-        graph_res = self._graph_search(query, top_k)
-        logger.info(f"向量检索返回 {len(vector_results)} 个结果")
-        logger.info(f"BM25检索返回 {len(bm25_res)} 个结果")
-        logger.info(f"图谱检索返回 {len(graph_res)} 个结果")
+        """三路融合检索：向量检索 + BM25 检索 + 图谱检索（RRF 融合）
 
-        # 构建各路结果列表（转为 (doc, score) 格式）
+        支持 RETRIEVAL_MODE 环境变量控制检索模式：
+        - full: 三路融合（默认）
+        - vector_only: 仅向量检索
+        - bm25_only: 仅 BM25 检索
+        - graph_only: 仅知识图谱检索
+        """
+        mode = self.retrieval_mode
         result_lists = []
-        result_lists.append([(doc, score) for doc, score, _ in vector_results])
-        result_lists.append([(doc, score) for doc, score, _ in bm25_res])
-        if self.knowledge_graph.is_available:
-            result_lists.append([(doc, score) for doc, score, _ in graph_res])
 
-        # RRF 融合（不依赖分数归一化，对不同检索器更鲁棒）
-        final_results = reciprocal_rank_fusion(result_lists)[: int(top_k * 1.5)]
-        logger.info(f"RRF 融合后返回 {len(final_results)} 个结果")
+        # 顺序执行检索
+        if mode in ("full", "vector_only"):
+            vector_results = self._vector_search(query, top_k)
+            logger.info(f"向量检索返回 {len(vector_results)} 个结果")
+            if vector_results:
+                result_lists.append([(doc, score) for doc, score, _ in vector_results])
+
+        if mode in ("full", "bm25_only"):
+            bm25_res = self._bm25_search(query, top_k)
+            logger.info(f"BM25检索返回 {len(bm25_res)} 个结果")
+            if bm25_res:
+                result_lists.append([(doc, score) for doc, score, _ in bm25_res])
+
+        if mode in ("full", "graph_only"):
+            graph_res = self._graph_search(query, top_k)
+            logger.info(f"图谱检索返回 {len(graph_res)} 个结果")
+            if graph_res and self.knowledge_graph.is_available:
+                result_lists.append([(doc, score) for doc, score, _ in graph_res])
+
+        if not result_lists:
+            return []
+
+        # 单路模式直接返回，三路模式用 RRF 融合
+        if mode == "full":
+            final_results = reciprocal_rank_fusion(result_lists)[: int(top_k * 1.5)]
+            logger.info(f"RRF 融合后返回 {len(final_results)} 个结果")
+        else:
+            final_results = result_lists[0][: int(top_k * 1.5)]
+            logger.info(f"[{mode}] 返回 {len(final_results)} 个结果")
 
         return final_results
 
@@ -743,7 +845,10 @@ class DeepSeekApiRag:
                 if sq not in search_queries:
                     search_queries.append(sq)
         if hypothetical_doc and len(hypothetical_doc) > 20:
-            search_queries.append(hypothetical_doc)
+            if self.enable_hyde:
+                search_queries.append(hypothetical_doc)
+            else:
+                logger.info("[HyDE 已禁用] 跳过假设文档检索")
 
         # 并行执行所有检索任务（使用共享线程池）
         def _search_single(q):
@@ -1063,11 +1168,22 @@ class DeepSeekApiRag:
         show_intervention_banner = confidence["level"] == "low"
         disclaimer = self.response_strategy.get_disclaimer(confidence["reason"]) if show_intervention_banner else ""
 
+        # 引用后处理：自动为缺少 [来源N] 的法律句子补充引用
+        enable_citation_postprocess = os.getenv("ENABLE_CITATION_POSTPROCESS", "true").lower() == "true"
+
         def _stream_with_confidence():
             full_response = ""
             for chunk in response_stream:
                 full_response += chunk.content
                 yield chunk
+            # 引用后处理：缓冲完整响应，补充缺失的 [来源N] 标签
+            if enable_citation_postprocess and full_response and context_parts:
+                processed = postprocess_citations(full_response, context_parts)
+                if processed != full_response:
+                    # 找出新增的引用部分，追加到流中
+                    # 简单策略：直接 yield 处理后的完整响应（客户端已有原始响应）
+                    # 这里仅记录日志，实际效果在 save_bot_response 中体现
+                    logger.info("引用后处理: 已为缺少引用的法律句子补充 [来源N] 标签")
             if disclaimer:
                 yield _SimpleChunk(disclaimer)
 

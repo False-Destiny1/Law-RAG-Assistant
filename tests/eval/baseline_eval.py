@@ -1,279 +1,183 @@
-"""
-RAG 系统基准测试脚本
-用于在改进前后对比检索和生成效果。
-运行前确保服务已启动: python -m uvicorn app:app --host 127.0.0.1 --port 8080
-"""
+"""三路融合检索 baseline 对比实验
 
-import json
+通过 RETRIEVAL_MODE 环境变量控制检索模式，对比不同检索路的贡献。
+
+用法:
+    # 跑 full 模式（三路融合）
+    python -m tests.eval.baseline_eval
+
+    # 跑单路模式
+    RETRIEVAL_MODE=vector_only python -m tests.eval.baseline_eval
+
+    # 一次性跑全部 4 组
+    python -m tests.eval.baseline_eval --all
+
+输出: baseline_{mode}.json, baseline_comparison.md
+"""
 import os
 import sys
-import time
+import json
+import asyncio
 
-import requests
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-BASE_URL = "http://127.0.0.1:8080"
+from tests.eval.ragas_dataset import EVAL_DATASET
 
-# ── 测试用例定义 ──────────────────────────────────────────────────────
-TEST_CASES = [
-    # === 检索质量测试 ===
-    {
-        "id": "R1",
-        "category": "检索-直接法律查询",
-        "query": "劳动合同解除的条件有哪些？",
-        "expect_keywords": ["第三十九条", "第四十条", "用人单位", "劳动者"],
-        "notes": "标准法律术语查询，应精确匹配《劳动合同法》相关条款",
-    },
-    {
-        "id": "R2",
-        "category": "检索-口语化查询",
-        "query": "老板不给加班费怎么办",
-        "expect_keywords": ["加班", "工资报酬", "第四十四条"],
-        "notes": "口语化表达，当前系统直接检索，应匹配《劳动法》加班工资条款",
-    },
-    {
-        "id": "R3",
-        "category": "检索-模糊查询",
-        "query": "离婚财产怎么分",
-        "expect_keywords": ["共同财产", "分割", "第一千零八十七条"],
-        "notes": "短查询，向量检索可能召回率低",
-    },
-    {
-        "id": "R4",
-        "category": "检索-复合问题",
-        "query": "离婚时财产怎么分，孩子抚养权归谁？",
-        "expect_keywords": ["财产", "抚养", "子女"],
-        "notes": "两个独立子问题混合，应分别检索到财产分割和抚养权条款",
-    },
-    {
-        "id": "R5",
-        "category": "检索-冷门法律",
-        "query": "深海海底资源勘探有什么法律规定",
-        "expect_keywords": ["深海海底", "资源勘探"],
-        "notes": "冷门法律，测试小众领域检索能力",
-    },
-    # === 多轮对话测试 ===
-    {
-        "id": "M1",
-        "category": "多轮-指代消解",
-        "query": "那试用期呢？",
-        "context": "上一轮问的是劳动合同解除条件",
-        "expect_keywords": ["试用期", "解除"],
-        "notes": "需要理解'那'指代的是劳动合同解除，当前系统可能检索不到",
-    },
-    {
-        "id": "M2",
-        "category": "多轮-追问深入",
-        "query": "具体要赔偿多少钱？",
-        "context": "上一轮问的是违法解除劳动合同的后果",
-        "expect_keywords": ["赔偿", "经济补偿", "二倍"],
-        "notes": "需要理解上下文才能检索到赔偿标准",
-    },
-    # === 边界情况测试 ===
-    {
-        "id": "E1",
-        "category": "边界-无关问题",
-        "query": "今天天气怎么样？",
-        "expect_keywords": [],
-        "notes": "应如实回答无法回答，不应编造法律条文",
-    },
-    {
-        "id": "E2",
-        "category": "边界-超短查询",
-        "query": "借钱",
-        "expect_keywords": ["借款", "借贷", "合同"],
-        "notes": "极短查询，测试检索鲁棒性",
-    },
-    {
-        "id": "E3",
-        "category": "边界-跨法律查询",
-        "query": "网络诈骗涉及哪些法律？",
-        "expect_keywords": ["诈骗", "刑法", "电信网络诈骗"],
-        "notes": "需要检索多部法律（刑法、反电信网络诈骗法等）",
-    },
+MODES = [
+    ("full", "三路融合 (FAISS+BM25+Neo4j)"),
+    ("vector_only", "FAISS Only"),
+    ("bm25_only", "BM25 Only"),
+    ("graph_only", "Neo4j Only"),
 ]
 
 
-def login(session: requests.Session, phone: str = "13333333333", password: str = "123456"):
-    """登录获取会话"""
-    resp = session.post(
-        f"{BASE_URL}/login", data={"identifier": phone, "password": password, "remember": "on"}, allow_redirects=False
-    )
-    return resp.status_code in (200, 303)
+def _compute_precision(retrieved, reference):
+    """检索到的文档中有多少是相关的"""
+    if not retrieved or not reference:
+        return 0.0
+    ref_set = set(r[:50] for r in reference)
+    hits = sum(1 for doc in retrieved if any(ref in doc[:100] for ref in ref_set))
+    return hits / len(retrieved)
 
 
-def create_chat(session: requests.Session) -> str:
-    """创建新对话，返回 chat_id"""
-    resp = session.post(f"{BASE_URL}/api/chats", json={"title": "基准测试"})
-    if resp.status_code == 200:
-        return resp.json().get("chat_id") or resp.json().get("id")
-    return None
+def _compute_recall(retrieved, reference):
+    """相关文档中有多少被检索到了"""
+    if not reference:
+        return 0.0
+    ref_set = set(r[:50] for r in reference)
+    hits = sum(1 for ref in ref_set if any(ref in doc[:100] for doc in retrieved))
+    return hits / len(ref_set)
 
 
-def ask_stream(session: requests.Session, chat_id: str, query: str, timeout: int = 60) -> dict:
-    """发送流式问答请求，收集完整响应"""
-    start_time = time.time()
-    full_answer = ""
-    chunks = []
-    error = None
+def _compute_hit_rate(retrieved, reference):
+    """是否命中至少一条相关文档"""
+    if not reference:
+        return 0.0
+    ref_set = set(r[:50] for r in reference)
+    for doc in retrieved:
+        if any(ref in doc[:100] for ref in ref_set):
+            return 1.0
+    return 0.0
+
+
+async def evaluate_single(rag, case):
+    """对单条 case 跑检索，返回基础检索指标"""
+    query = case["question"]
+    reference_contexts = case.get("reference_contexts", [])
 
     try:
-        resp = session.post(
-            f"{BASE_URL}/ask_stream",
-            data={
-                "user_input": query,
-                "chat_id": chat_id,
-            },
-            stream=True,
-            timeout=timeout,
+        analysis = await rag.analyze_query(query)
+        docs = await rag.retrieve_documents(
+            query=query,
+            rewritten_query=analysis.get("rewritten_query", query),
+            sub_queries=analysis.get("sub_queries", []),
+            hypothetical_doc=analysis.get("hypothetical_doc", ""),
         )
-
-        for line in resp.iter_lines(decode_unicode=True):
-            if not line or not line.startswith("data: "):
-                continue
-            data_str = line[6:]
-            if data_str.strip() == "[DONE]":
-                break
-            try:
-                data = json.loads(data_str)
-                if "error" in data:
-                    error = data["error"]
-                    break
-                content = data.get("content", "")
-                if content:
-                    full_answer += content
-                    chunks.append(content)
-            except json.JSONDecodeError:
-                continue
     except Exception as e:
-        error = str(e)
+        print(f"  检索失败: {e}")
+        docs = []
 
-    elapsed = time.time() - start_time
-
+    retrieved_texts = [doc for doc, _ in docs] if docs else []
     return {
-        "answer": full_answer,
-        "chunks_count": len(chunks),
-        "elapsed_sec": round(elapsed, 2),
-        "first_chunk_sec": None,  # TODO: 可以后续精确测量
-        "error": error,
-        "char_count": len(full_answer),
+        "context_precision": _compute_precision(retrieved_texts, reference_contexts),
+        "context_recall": _compute_recall(retrieved_texts, reference_contexts),
+        "retrieval_hit_rate": _compute_hit_rate(retrieved_texts, reference_contexts),
     }
 
 
-def check_keywords(answer: str, keywords: list) -> dict:
-    """检查回答中是否包含期望关键词"""
-    found = []
-    missing = []
-    for kw in keywords:
-        if kw in answer:
-            found.append(kw)
-        else:
-            missing.append(kw)
-    hit_rate = len(found) / len(keywords) if keywords else 1.0
-    return {"found": found, "missing": missing, "hit_rate": round(hit_rate, 2)}
+async def run_mode(mode):
+    """运行单个检索模式"""
+    from law_assistant.rag import DeepSeekApiRag
 
+    label = dict(MODES).get(mode, mode)
+    print(f"\n{'='*60}")
+    print(f"  检索模式: {label}")
+    print(f"{'='*60}\n")
 
-def run_evaluation():
-    """运行完整基准测试"""
-    print("=" * 60)
-    print("RAG 系统基准测试")
-    print("=" * 60)
+    os.environ["RETRIEVAL_MODE"] = mode
+    rag = DeepSeekApiRag()
 
-    # 检查服务是否可用
-    try:
-        resp = requests.get(f"{BASE_URL}/login", timeout=5)
-        if resp.status_code != 200:
-            print("服务未就绪，请先启动: python -m uvicorn app:app --host 127.0.0.1 --port 8080")
-            sys.exit(1)
-    except Exception as e:
-        print(f"无法连接服务: {e}")
-        sys.exit(1)
-
-    # 登录
-    session = requests.Session()
-    if not login(session):
-        print("登录失败，请确认测试账号存在")
-        sys.exit(1)
-    print("登录成功")
-
-    # 创建测试对话
-    chat_id = create_chat(session)
-    if not chat_id:
-        print("创建对话失败")
-        sys.exit(1)
-    print(f"创建测试对话: chat_id={chat_id}")
-
-    # 运行测试用例
     results = []
-    for tc in TEST_CASES:
-        print(f"\n--- [{tc['id']}] {tc['category']} ---")
-        print(f"查询: {tc['query']}")
+    for i, case in enumerate(EVAL_DATASET):
+        print(f"[{i+1}/15] {case['id']}: {case['question'][:40]}...")
+        metrics = await evaluate_single(rag, case)
+        results.append({"id": case["id"], "question": case["question"], **metrics})
+        print(f"  P={metrics['context_precision']:.3f}  R={metrics['context_recall']:.3f}  H={metrics['retrieval_hit_rate']:.3f}")
 
-        result = ask_stream(session, chat_id, tc["query"])
-        kw_check = check_keywords(result["answer"], tc["expect_keywords"])
+    # 计算均值
+    avg = {}
+    for key in ["context_precision", "context_recall", "retrieval_hit_rate"]:
+        values = [r[key] for r in results]
+        avg[key] = sum(values) / len(values) if values else 0
 
-        print(f"耗时: {result['elapsed_sec']}s | 字数: {result['char_count']}")
-        print(f"关键词命中率: {kw_check['hit_rate'] * 100}% ({len(kw_check['found'])}/{len(tc['expect_keywords'])})")
-        if kw_check["missing"]:
-            print(f"缺失关键词: {kw_check['missing']}")
-        if result["error"]:
-            print(f"错误: {result['error']}")
-        print(f"回答前100字: {result['answer'][:100]}...")
+    print(f"\n--- {label} 均值 ---")
+    for k, v in avg.items():
+        print(f"  {k}: {v:.4f}")
 
-        results.append(
-            {
-                "test_id": tc["id"],
-                "category": tc["category"],
-                "query": tc["query"],
-                "answer_preview": result["answer"][:200],
-                "answer_length": result["char_count"],
-                "elapsed_sec": result["elapsed_sec"],
-                "keyword_hit_rate": kw_check["hit_rate"],
-                "keywords_found": kw_check["found"],
-                "keywords_missing": kw_check["missing"],
-                "error": result["error"],
-                "notes": tc["notes"],
-            }
-        )
-
-    # 汇总统计
-    print("\n" + "=" * 60)
-    print("汇总统计")
-    print("=" * 60)
-
-    successful = [r for r in results if not r["error"]]
-    failed = [r for r in results if r["error"]]
-
-    avg_time = sum(r["elapsed_sec"] for r in successful) / len(successful) if successful else 0
-    avg_hit = sum(r["keyword_hit_rate"] for r in successful) / len(successful) if successful else 0
-    avg_len = sum(r["answer_length"] for r in successful) / len(successful) if successful else 0
-
-    print(f"成功: {len(successful)}/{len(results)}")
-    print(f"失败: {len(failed)}/{len(results)}")
-    print(f"平均响应时间: {avg_time:.2f}s")
-    print(f"平均关键词命中率: {avg_hit * 100:.1f}%")
-    print(f"平均回答字数: {avg_len:.0f}")
-
-    # 保存结果
-    output = {
-        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "summary": {
-            "total": len(results),
-            "success": len(successful),
-            "failed": len(failed),
-            "avg_response_time_sec": round(avg_time, 2),
-            "avg_keyword_hit_rate": round(avg_hit, 3),
-            "avg_answer_length": round(avg_len),
-        },
-        "results": results,
-    }
-
-    output_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "baseline_results.json")
-    with open(output_file, "w", encoding="utf-8") as f:
+    # 保存
+    output = {"mode": mode, "label": label, "avg": avg, "per_case": results}
+    out_path = os.path.join(os.path.dirname(__file__), f"baseline_{mode}.json")
+    with open(out_path, "w", encoding="utf-8") as f:
         json.dump(output, f, ensure_ascii=False, indent=2)
-    print(f"\n结果已保存到 {output_file}")
+    print(f"结果已保存: {out_path}")
 
-    return output
+    return mode, avg
+
+
+def generate_comparison_md(all_avgs):
+    """生成对比报告"""
+    out_path = os.path.join(os.path.dirname(__file__), "..", "..", "baseline_comparison.md")
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("# 三路融合检索 Baseline 对比实验\n\n")
+        f.write("## 实验设计\n\n")
+        f.write("通过 `RETRIEVAL_MODE` 环境变量控制检索模式，使用现有 RAGAS 评估数据集（15 条）进行对比。\n\n")
+        f.write("| 对比组 | 检索方式 |\n|---|---|\n")
+        for mode, label in MODES:
+            f.write(f"| {label} | `RETRIEVAL_MODE={mode}` |\n")
+
+        f.write("\n## 对比结果\n\n")
+        f.write("| 指标 | 三路融合 | FAISS Only | BM25 Only | Neo4j Only |\n")
+        f.write("|---|---|---|---|---|\n")
+        for metric in ["context_precision", "context_recall", "retrieval_hit_rate"]:
+            row = f"| {metric} |"
+            for mode, _ in MODES:
+                val = all_avgs.get(mode, {}).get(metric, 0)
+                row += f" {val:.4f} |"
+            f.write(row + "\n")
+
+        # 分析
+        full_r = all_avgs.get("full", {}).get("context_recall", 0)
+        vec_r = all_avgs.get("vector_only", {}).get("context_recall", 0)
+        bm_r = all_avgs.get("bm25_only", {}).get("context_recall", 0)
+        gph_r = all_avgs.get("graph_only", {}).get("context_recall", 0)
+
+        f.write("\n## 分析\n\n")
+        best_single = max(vec_r, bm_r, gph_r)
+        if full_r > best_single:
+            f.write(f"- 三路融合 context_recall ({full_r:.4f}) 优于最佳单路 ({best_single:.4f})，融合有效\n")
+        else:
+            f.write(f"- 三路融合 context_recall ({full_r:.4f}) 未超过最佳单路 ({best_single:.4f})，需分析原因\n")
+
+        f.write(f"- FAISS Recall: {vec_r:.4f} — BM25 Recall: {bm_r:.4f} — Graph Recall: {gph_r:.4f}\n")
+
+    print(f"\n对比报告已生成: {out_path}")
+
+
+async def main():
+    run_all = "--all" in sys.argv
+    mode = os.getenv("RETRIEVAL_MODE", "full")
+
+    if run_all:
+        all_avgs = {}
+        for m, _ in MODES:
+            _, avg = await run_mode(m)
+            all_avgs[m] = avg
+        generate_comparison_md(all_avgs)
+    else:
+        _, avg = await run_mode(mode)
+        if mode == "full":
+            generate_comparison_md({"full": avg})
 
 
 if __name__ == "__main__":
-    run_evaluation()
+    asyncio.run(main())
