@@ -3,8 +3,10 @@ import hmac
 import logging
 import os
 import urllib.parse
+
 from fastapi import Request
 from fastapi.responses import JSONResponse, RedirectResponse
+
 from web.auth import SESSION_SECRET
 
 logger = logging.getLogger(__name__)

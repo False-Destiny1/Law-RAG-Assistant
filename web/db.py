@@ -2,7 +2,8 @@ import logging
 import os
 import secrets
 
-from sqlalchemy import create_engine, text as _text
+from sqlalchemy import create_engine
+from sqlalchemy import text as _text
 from sqlalchemy.orm import sessionmaker
 
 from web.models import Base, User

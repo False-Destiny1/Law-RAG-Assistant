@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 def _cuda_available() -> bool:
     try:
         import torch
+
         return torch.cuda.is_available()
     except ImportError:
         return False
@@ -31,12 +32,18 @@ class EmbeddingFactory:
             logger.info(f"Creating DashScope embedding: {model}")
 
             primary = OpenAIEmbeddings(
-                api_key=api_key, base_url=base_url, model=model,
-                check_embedding_ctx_length=False, chunk_size=10,
+                api_key=api_key,
+                base_url=base_url,
+                model=model,
+                check_embedding_ctx_length=False,
+                chunk_size=10,
             )
             fallback = OpenAIEmbeddings(
-                api_key=api_key, base_url=base_url, model=fallback_model,
-                check_embedding_ctx_length=False, chunk_size=10,
+                api_key=api_key,
+                base_url=base_url,
+                model=fallback_model,
+                check_embedding_ctx_length=False,
+                chunk_size=10,
             )
             return primary, fallback
         else:

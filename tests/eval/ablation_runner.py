@@ -12,25 +12,30 @@
     # 跑 hyde 消融
     python -m tests.eval.ablation_runner --ablation hyde --scene B
 """
+
+import argparse
+import json
 import os
 import sys
-import json
-import argparse
 from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from dotenv import load_dotenv
+
 load_dotenv()
 
-from tests.eval.ragas_dataset import EVAL_DATASET
+from tests.eval.ragas_dataset import EVAL_DATASET  # noqa: E402
 
 SCENES = {
-    "A": {"name": "精确法律查询", "ids": ["R1", "R2", "R3", "R4", "R5"]},
-    "B": {"name": "口语化查询", "ids": ["C1", "C2"]},
-    "C": {"name": "复合问题", "ids": ["M1"]},
-    "D": {"name": "冷门法律", "ids": ["D1", "D2"]},
-    "E": {"name": "多轮对话", "ids": ["T1", "T2"]},
+    "A": {"name": "精确法律查询", "ids": ["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10"]},
+    "B": {"name": "口语化查询", "ids": ["C1", "C2", "C3", "C4", "C5", "C6", "C7"]},
+    "C": {"name": "复合问题", "ids": ["M1", "M2", "M3", "M4", "M5", "M6", "M7"]},
+    "D": {"name": "冷门法律", "ids": ["D1", "D2", "D3", "D4", "D5"]},
+    "E": {"name": "多轮对话", "ids": ["T1", "T2", "T3", "T4", "T5", "T6", "T7"]},
+    "F": {"name": "边界情况", "ids": ["B1", "B2", "B3", "B4", "B5", "B6"]},
+    "G": {"name": "对抗性测试", "ids": ["A1", "A2", "A3", "A4", "A5"]},
+    "H": {"name": "数值推理", "ids": ["N1", "N2", "N3"]},
 }
 
 ABLATIONS = {
@@ -38,7 +43,12 @@ ABLATIONS = {
         "name": "三路融合检索",
         "attr": "retrieval_mode",
         "configs": ["full", "vector_only", "bm25_only", "graph_only"],
-        "labels": {"full": "三路融合", "vector_only": "FAISS Only", "bm25_only": "BM25 Only", "graph_only": "Neo4j Only"},
+        "labels": {
+            "full": "三路融合",
+            "vector_only": "FAISS Only",
+            "bm25_only": "BM25 Only",
+            "graph_only": "Neo4j Only",
+        },
     },
     "hyde": {
         "name": "HyDE 检索增强",
@@ -79,11 +89,11 @@ def run_ablation(ablation_name, scene_key=None):
         cases = EVAL_DATASET
         scene_name = "全部场景"
 
-    print(f"\n{'='*50}")
+    print(f"\n{'=' * 50}")
     print(f"  消融: {ablation['name']}")
     print(f"  场景: {scene_name} ({len(cases)} cases)")
     print(f"  配置: {[labels[c] for c in configs]}")
-    print(f"{'='*50}\n")
+    print(f"{'=' * 50}\n")
 
     # 初始化 RAG（只一次）
     print("Loading RAG model...")
@@ -114,7 +124,9 @@ def run_ablation(ablation_name, scene_key=None):
 
             retrieved = [doc for doc, _ in docs] if docs else []
             metrics = compute_metrics(retrieved, case.get("reference_contexts", []))
-            results.append({"id": case["id"], "category": case["category"], "question": case["question"][:50], **metrics})
+            results.append(
+                {"id": case["id"], "category": case["category"], "question": case["question"][:50], **metrics}
+            )
             print(f"  {case['id']}: P={metrics['precision']:.3f} R={metrics['recall']:.3f}")
 
         all_results[config_val] = results
@@ -133,7 +145,9 @@ def save_report(ablation_name, scene_key, all_results):
     scene_label = f"_{scene_key}" if scene_key else ""
     scene_name = SCENES[scene_key]["name"] if scene_key else "全部"
 
-    out_path = os.path.join(os.path.dirname(__file__), "results", "ablation", f"ablation_{ablation_name}{scene_label}.md")
+    out_path = os.path.join(
+        os.path.dirname(__file__), "results", "ablation", f"ablation_{ablation_name}{scene_label}.md"
+    )
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(f"# 消融: {ablation['name']} — {scene_name}\n\n")
         f.write(f"> 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n")
@@ -176,7 +190,9 @@ def save_report(ablation_name, scene_key, all_results):
                 avg_r = sum(r["recall"] for r in all_results[c]) / n_cases
                 p_pct = ((avg_p - base_avg_p) / base_avg_p * 100) if base_avg_p > 0 else 0
                 r_pct = ((avg_r - base_avg_r) / base_avg_r * 100) if base_avg_r > 0 else 0
-                f.write(f"| {labels[c]} | {p_pct:+.1f}% ({avg_p - base_avg_p:+.3f}) | {r_pct:+.1f}% ({avg_r - base_avg_r:+.3f}) |\n")
+                f.write(
+                    f"| {labels[c]} | {p_pct:+.1f}% ({avg_p - base_avg_p:+.3f}) | {r_pct:+.1f}% ({avg_r - base_avg_r:+.3f}) |\n"
+                )
 
     print(f"报告: {out_path}")
 

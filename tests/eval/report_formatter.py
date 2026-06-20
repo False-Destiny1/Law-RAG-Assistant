@@ -7,16 +7,17 @@
 
 输出: ragas_report.md
 """
+
+import json
 import os
 import sys
-import json
 
 sys_path = os.path.join(os.path.dirname(__file__), "..", "..")
 
 
 def generate():
     report_path = os.path.join(sys_path, "tests", "eval", "ragas_report.json")
-    with open(report_path, "r", encoding="utf-8") as f:
+    with open(report_path, encoding="utf-8") as f:
         report = json.load(f)
 
     cases = report.get("per_case", [])
@@ -87,7 +88,9 @@ def generate():
 
         # 改进方向
         f.write("\n## 改进方向\n\n")
-        f.write("1. **优化 citation_coverage**: 在 chunk 切割时保留引用元数据（法条编号、章节标题），扩展引用提取正则规则\n")
+        f.write(
+            "1. **优化 citation_coverage**: 在 chunk 切割时保留引用元数据（法条编号、章节标题），扩展引用提取正则规则\n"
+        )
         f.write("2. **改善冷门法律检索**: 扩展 BM25 法律词典覆盖更多领域，或引入多知识库检索\n")
         f.write("3. **提升 reranker 分数**: 调优 reranker 阈值（当前 0.15），或尝试更大的 reranker 模型\n")
         f.write("4. **消融实验验证**: 补充 baseline 对比（FAISS-only / BM25-only / Graph-only）和 HyDE 消融实验\n")

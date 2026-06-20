@@ -29,6 +29,7 @@ load_dotenv()
 # ── Helper for no-confidence streaming ────────────────────────────────
 class _SimpleChunk:
     """Minimal chunk wrapper for non-LLM streaming responses."""
+
     __slots__ = ("content",)
 
     def __init__(self, content: str):
@@ -155,6 +156,7 @@ class ConfidenceEvaluator:
             else:
                 doc_text = doc
             import re as _re
+
             law_match = _re.search(r"《(.+?)》", doc_text)
             if law_match:
                 unique_laws.add(law_match.group(1))
@@ -207,6 +209,7 @@ class ResponseStrategy:
 
     def get_disclaimer(self, reason: str) -> str:
         return self.DISCLAIMER_TEMPLATE.format(reason=reason)
+
 
 # Shared thread pool for concurrent retrieval (avoids creating a new pool per query)
 _SHARED_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=8)
@@ -488,9 +491,7 @@ class DeepSeekApiRag:
                 if history == "无对话历史":
                     history = ""
 
-        prompt = self._get_prompt(
-            "query_analysis_prompt", query=query, conversation_history=history or "无对话历史"
-        )
+        prompt = self._get_prompt("query_analysis_prompt", query=query, conversation_history=history or "无对话历史")
 
         for attempt in range(3):
             try:
@@ -638,7 +639,7 @@ class DeepSeekApiRag:
         """添加文件夹中的所有文档"""
         import time
 
-        supported_extensions = (".pdf", ".doc", ".docx", ".txt", ".jpg", ".jpeg", ".png", ".bmp", ".tiff")
+        supported_extensions = (".pdf", ".doc", ".docx", ".txt", ".json", ".jpg", ".jpeg", ".png", ".bmp", ".tiff")
 
         if not os.path.exists(folder_path):
             logger.warning(f"文件夹不存在: {folder_path}")

@@ -7,8 +7,9 @@
 
 输出: bad_case_list.md
 """
-import os
+
 import json
+import os
 
 sys_path = os.path.join(os.path.dirname(__file__), "..", "..")
 
@@ -35,7 +36,7 @@ def classify_failure(metrics):
 
 def analyze():
     report_path = os.path.join(sys_path, "tests", "eval", "ragas_report.json")
-    with open(report_path, "r", encoding="utf-8") as f:
+    with open(report_path, encoding="utf-8") as f:
         report = json.load(f)
 
     cases = report.get("per_case", [])
@@ -52,18 +53,20 @@ def analyze():
         )
         if is_bad:
             failure_type, reason = classify_failure(m)
-            bad_cases.append({
-                "id": case["id"],
-                "category": case.get("category", ""),
-                "question": case.get("question", ""),
-                "context_precision": m.get("context_precision", 0),
-                "context_recall": m.get("context_recall", 0),
-                "faithfulness": m.get("faithfulness", 0),
-                "citation_coverage": m.get("citation_coverage", 0),
-                "retrieval_hit_rate": m.get("retrieval_hit_rate", 0),
-                "failure_type": failure_type,
-                "reason": reason,
-            })
+            bad_cases.append(
+                {
+                    "id": case["id"],
+                    "category": case.get("category", ""),
+                    "question": case.get("question", ""),
+                    "context_precision": m.get("context_precision", 0),
+                    "context_recall": m.get("context_recall", 0),
+                    "faithfulness": m.get("faithfulness", 0),
+                    "citation_coverage": m.get("citation_coverage", 0),
+                    "retrieval_hit_rate": m.get("retrieval_hit_rate", 0),
+                    "failure_type": failure_type,
+                    "reason": reason,
+                }
+            )
 
     # 按严重程度排序（context_precision 最低的排前面）
     bad_cases.sort(key=lambda x: x["context_precision"])
@@ -98,7 +101,7 @@ def analyze():
         for bc in bad_cases:
             f.write(f"### {bc['id']} [{bc['category']}]\n\n")
             f.write(f"**问题**: {bc['question']}\n\n")
-            f.write(f"| 指标 | 值 |\n|---|---|\n")
+            f.write("| 指标 | 值 |\n|---|---|\n")
             f.write(f"| context_precision | {bc['context_precision']:.3f} |\n")
             f.write(f"| context_recall | {bc['context_recall']:.3f} |\n")
             f.write(f"| faithfulness | {bc['faithfulness']:.3f} |\n")
@@ -126,5 +129,6 @@ def analyze():
 
 if __name__ == "__main__":
     import sys
+
     sys.path.insert(0, sys_path)
     analyze()

@@ -15,7 +15,7 @@ class WeightAdapter:
     """
 
     LEARNING_RATE = 0.05  # 5% adjustment per feedback event
-    MIN_WEIGHT = 0.05     # Floor to prevent any source from being silenced
+    MIN_WEIGHT = 0.05  # Floor to prevent any source from being silenced
 
     def __init__(self, initial_weights: dict[str, float] = None):
         self._weights = initial_weights or {"vector": 0.4, "bm25": 0.3, "graph": 0.3}

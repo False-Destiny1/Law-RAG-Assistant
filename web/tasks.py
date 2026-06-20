@@ -43,6 +43,7 @@ _EXT_TO_MIME = {
     "pdf": "application/pdf",
     "docx": "application/zip",
     "txt": "text/plain",
+    "json": "application/json",
     "jpg": "image/jpeg",
     "jpeg": "image/jpeg",
     "png": "image/png",
@@ -65,8 +66,8 @@ def _validate_file_magic(file_path: str, expected_ext: str) -> str | None:
             detected_mime = mime
             break
 
-    # TXT 没有 magic bytes，跳过校验
-    if expected_ext == "txt":
+    # TXT 和 JSON 没有 magic bytes，跳过校验
+    if expected_ext in ("txt", "json"):
         return None
 
     expected_mime = _EXT_TO_MIME.get(expected_ext)
@@ -138,19 +139,25 @@ def _track_knowledge_gap(db: Session, user_id: int, query: str, confidence: dict
     """记录知识库缺口（相同前缀的查询合并计数）"""
     try:
         query_prefix = query[:50]
-        existing = db.query(KnowledgeGap).filter(
-            KnowledgeGap.query.like(f"%{query_prefix}%"),
-            KnowledgeGap.status == "open",
-        ).first()
+        existing = (
+            db.query(KnowledgeGap)
+            .filter(
+                KnowledgeGap.query.like(f"%{query_prefix}%"),
+                KnowledgeGap.status == "open",
+            )
+            .first()
+        )
         if existing:
             existing.frequency += 1
         else:
-            db.add(KnowledgeGap(
-                query=query,
-                confidence_level=confidence.get("level", "none"),
-                confidence_reason=confidence.get("reason", ""),
-                user_id=user_id,
-            ))
+            db.add(
+                KnowledgeGap(
+                    query=query,
+                    confidence_level=confidence.get("level", "none"),
+                    confidence_reason=confidence.get("reason", ""),
+                    user_id=user_id,
+                )
+            )
         db.commit()
     except Exception as e:
         logger.warning(f"记录知识库缺口失败: {e}")

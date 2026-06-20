@@ -59,6 +59,7 @@ def _init_rag():
         db = SessionLocal()
         try:
             from web.models import UploadedDocument
+
             for doc in db.query(UploadedDocument).all():
                 if os.path.exists(doc.file_path):
                     try:
@@ -88,6 +89,7 @@ def _init_rag():
 
     # Inject rag_model into routes
     import web.routes as _routes
+
     _routes.rag_model = rag_model
 
 
@@ -101,6 +103,7 @@ def _init_admin():
         admin = db.query(User).filter(User.role == "admin").first()
         if not admin:
             import secrets
+
             admin_password = os.getenv("ADMIN_PASSWORD")
             if not admin_password:
                 admin_password = secrets.token_urlsafe(16)
@@ -123,6 +126,7 @@ def _init_admin():
 @asynccontextmanager
 async def lifespan(app_instance):
     from law_assistant.redis_utils import close_pool, is_available
+
     if is_available():
         logger.info("Redis 连接成功")
     else:
@@ -137,7 +141,8 @@ def create_app() -> FastAPI:
     app = FastAPI(title="智能法律助手", lifespan=lifespan)
 
     # Register middleware (order matters: last registered = first executed)
-    from web.middleware import security_headers, csrf_middleware, rate_limit_middleware
+    from web.middleware import csrf_middleware, rate_limit_middleware, security_headers
+
     app.middleware("http")(security_headers)
     app.middleware("http")(csrf_middleware)
     app.middleware("http")(rate_limit_middleware)
@@ -154,14 +159,17 @@ def create_app() -> FastAPI:
 
     # Inject templates into routes
     import web.routes as _routes
+
     _routes.templates = templates
 
     # Register routes
     from web.routes import router
+
     app.include_router(router)
 
     # Auth exception handler
     from web.auth import auth_redirect_handler
+
     app.exception_handler(401)(auth_redirect_handler)
 
     # Create directories

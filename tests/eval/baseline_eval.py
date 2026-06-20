@@ -14,10 +14,11 @@
 
 输出: baseline_{mode}.json, baseline_comparison.md
 """
+
+import asyncio
+import json
 import os
 import sys
-import json
-import asyncio
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -90,19 +91,21 @@ async def run_mode(mode):
     from law_assistant.rag import DeepSeekApiRag
 
     label = dict(MODES).get(mode, mode)
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"  检索模式: {label}")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
     os.environ["RETRIEVAL_MODE"] = mode
     rag = DeepSeekApiRag()
 
     results = []
     for i, case in enumerate(EVAL_DATASET):
-        print(f"[{i+1}/15] {case['id']}: {case['question'][:40]}...")
+        print(f"[{i + 1}/15] {case['id']}: {case['question'][:40]}...")
         metrics = await evaluate_single(rag, case)
         results.append({"id": case["id"], "question": case["question"], **metrics})
-        print(f"  P={metrics['context_precision']:.3f}  R={metrics['context_recall']:.3f}  H={metrics['retrieval_hit_rate']:.3f}")
+        print(
+            f"  P={metrics['context_precision']:.3f}  R={metrics['context_recall']:.3f}  H={metrics['retrieval_hit_rate']:.3f}"
+        )
 
     # 计算均值
     avg = {}

@@ -8,12 +8,13 @@
     python -m tests.eval.ablation_framework --ablation reranker
     python -m tests.eval.ablation_framework --ablation citation
 """
-import os
-import sys
-import json
-import asyncio
-import statistics
+
 import argparse
+import asyncio
+import json
+import os
+import statistics
+import sys
 from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -23,11 +24,14 @@ from tests.eval.ragas_dataset import EVAL_DATASET
 # ── 场景分组 ──────────────────────────────────────────────────────────
 
 SCENES = {
-    "A_精确法律查询": ["R1", "R2", "R3", "R4", "R5"],
-    "B_口语化查询": ["C1", "C2"],
-    "C_复合问题": ["M1"],
-    "D_冷门法律": ["D1", "D2"],
-    "E_多轮对话": ["T1", "T2"],
+    "A_精确法律查询": ["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10"],
+    "B_口语化查询": ["C1", "C2", "C3", "C4", "C5", "C6", "C7"],
+    "C_复合问题": ["M1", "M2", "M3", "M4", "M5", "M6", "M7"],
+    "D_冷门法律": ["D1", "D2", "D3", "D4", "D5"],
+    "E_多轮对话": ["T1", "T2", "T3", "T4", "T5", "T6", "T7"],
+    "F_边界情况": ["B1", "B2", "B3", "B4", "B5", "B6"],
+    "G_对抗性测试": ["A1", "A2", "A3", "A4", "A5"],
+    "H_数值推理": ["N1", "N2", "N3"],
 }
 
 # ── 消融配置定义 ──────────────────────────────────────────────────────
@@ -68,6 +72,7 @@ RUNS_PER_CONFIG = 3
 
 
 # ── 评估函数 ──────────────────────────────────────────────────────────
+
 
 def compute_metrics(retrieved_texts, reference_contexts):
     """计算检索指标"""
@@ -110,16 +115,17 @@ async def evaluate_case(rag, case):
 
 # ── 主运行逻辑 ────────────────────────────────────────────────────────
 
+
 async def run_ablation(ablation_name):
     from law_assistant.rag import DeepSeekApiRag
 
     ablation = ABLATIONS[ablation_name]
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"  消融实验: {ablation['name']}")
     print(f"  配置: {ablation['configs']}")
     print(f"  每配置运行: {RUNS_PER_CONFIG} 次")
     print(f"  评估数据: {len(EVAL_DATASET)} 条")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
     all_results = {}
 
@@ -135,12 +141,14 @@ async def run_ablation(ablation_name):
 
             for i, case in enumerate(EVAL_DATASET):
                 metrics = await evaluate_case(rag, case)
-                run_data.append({
-                    "id": case["id"],
-                    "category": case["category"],
-                    **metrics,
-                })
-                print(f"  [{i+1}/15] {case['id']}: P={metrics['precision']:.3f} R={metrics['recall']:.3f}")
+                run_data.append(
+                    {
+                        "id": case["id"],
+                        "category": case["category"],
+                        **metrics,
+                    }
+                )
+                print(f"  [{i + 1}/15] {case['id']}: P={metrics['precision']:.3f} R={metrics['recall']:.3f}")
 
             mode_results.append(run_data)
 
@@ -150,16 +158,18 @@ async def run_ablation(ablation_name):
             precisions = [run[i]["precision"] for run in mode_results]
             recalls = [run[i]["recall"] for run in mode_results]
             hits = [run[i]["hit_rate"] for run in mode_results]
-            averaged.append({
-                "id": case["id"],
-                "category": case["category"],
-                "question": case["question"][:50],
-                "precision_mean": statistics.mean(precisions),
-                "precision_std": statistics.stdev(precisions) if len(precisions) > 1 else 0,
-                "recall_mean": statistics.mean(recalls),
-                "recall_std": statistics.stdev(recalls) if len(recalls) > 1 else 0,
-                "hit_rate_mean": statistics.mean(hits),
-            })
+            averaged.append(
+                {
+                    "id": case["id"],
+                    "category": case["category"],
+                    "question": case["question"][:50],
+                    "precision_mean": statistics.mean(precisions),
+                    "precision_std": statistics.stdev(precisions) if len(precisions) > 1 else 0,
+                    "recall_mean": statistics.mean(recalls),
+                    "recall_std": statistics.stdev(recalls) if len(recalls) > 1 else 0,
+                    "hit_rate_mean": statistics.mean(hits),
+                }
+            )
 
         all_results[config_val] = averaged
 

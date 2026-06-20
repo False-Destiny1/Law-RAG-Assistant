@@ -347,7 +347,9 @@ class LegalKnowledgeGraph:
             full_name = f"中华人民共和国{law_name}" if "中华人民共和国" not in law_name else law_name
             session.run(
                 "MERGE (l:Law {name: $name}) SET l.full_name = $full_name, l.category = $category",
-                name=law_name, full_name=full_name, category=category,
+                name=law_name,
+                full_name=full_name,
+                category=category,
             )
             stats["laws"] = 1
 
@@ -377,26 +379,36 @@ class LegalKnowledgeGraph:
                     if ch_pos < art_pos:
                         current_chapter = ch_num
 
-                article_params.append({
-                    "law": law_name,
-                    "num": art["number"],
-                    "text": art["text"][:2000],
-                    "chapter": current_chapter,
-                })
+                article_params.append(
+                    {
+                        "law": law_name,
+                        "num": art["number"],
+                        "text": art["text"][:2000],
+                        "chapter": current_chapter,
+                    }
+                )
 
                 # 收集引用和概念
                 citations = self.extract_citations(art["text"], law_name)
                 for cite in citations:
-                    all_citations.append({
-                        "law": law_name, "num": art["number"],
-                        "cited_law": cite["cited_law"], "cited_num": cite["cited_article"],
-                    })
+                    all_citations.append(
+                        {
+                            "law": law_name,
+                            "num": art["number"],
+                            "cited_law": cite["cited_law"],
+                            "cited_num": cite["cited_article"],
+                        }
+                    )
 
                 concepts = self.extract_concepts(art["text"])
                 for concept in concepts:
-                    all_concepts.append({
-                        "name": concept, "law": law_name, "num": art["number"],
-                    })
+                    all_concepts.append(
+                        {
+                            "name": concept,
+                            "law": law_name,
+                            "num": art["number"],
+                        }
+                    )
 
             # 批量写入条文
             if article_params:

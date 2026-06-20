@@ -21,8 +21,14 @@ from web.auth import require_user
 from web.db import SessionLocal, get_db
 from web.metrics import metrics
 from web.models import (
-    Chat, InterventionRequest, KnowledgeBase, KnowledgeGap,
-    Message, MessageFeedback, UploadedDocument, User,
+    Chat,
+    InterventionRequest,
+    KnowledgeBase,
+    KnowledgeGap,
+    Message,
+    MessageFeedback,
+    UploadedDocument,
+    User,
 )
 from web.security import check_injection
 from web.tasks import (
@@ -45,7 +51,9 @@ router = APIRouter()
 
 # ── Paths ────────────────────────────────────────────────────────────
 UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "uploads")
-KNOWLEDGE_BASE_FOLDER = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "knowledge_base")
+KNOWLEDGE_BASE_FOLDER = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "knowledge_base"
+)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -73,7 +81,8 @@ def login_submit(
     if not user or not user.check_password(password):
         return templates.TemplateResponse(request, "login.html", {"error": "手机号或密码错误"})
 
-    from web.auth import create_session_token, SESSION_EXPIRE_HOURS
+    from web.auth import SESSION_EXPIRE_HOURS, create_session_token
+
     token = create_session_token(user.id)
     response = RedirectResponse(url="/", status_code=303)
     max_age = SESSION_EXPIRE_HOURS * 3600 if remember else None
@@ -130,6 +139,7 @@ def logout(request: Request):
         try:
             from law_assistant.redis_utils import blacklist_token
             from web.auth import SESSION_EXPIRE_HOURS
+
             blacklist_token(token, ttl_seconds=SESSION_EXPIRE_HOURS * 3600)
         except Exception as e:
             logger.warning(f"Token 黑名单写入失败: {e}")
@@ -281,7 +291,7 @@ async def upload_submit(
     if user.role not in ["expert", "admin"]:
         return RedirectResponse(url="/", status_code=303)
 
-    allowed_extensions = {"pdf", "docx", "txt", "jpg", "jpeg", "png", "bmp", "tiff"}
+    allowed_extensions = {"pdf", "docx", "txt", "json", "jpg", "jpeg", "png", "bmp", "tiff"}
     if not file.filename:
         return JSONResponse({"error": "请选择文件"}, status_code=400)
     file_ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
@@ -579,10 +589,12 @@ def submit_feedback(
 
     # Track online evaluation metrics
     from web.online_eval import online_eval
+
     online_eval.record_feedback(rating, confidence_level="high")
 
     # Adaptive weight learning (thumbs up/down adjusts retrieval weights)
     from web.weight_adaptation import weight_adapter
+
     weight_adapter.update_from_feedback(["vector", "bm25", "graph"], rating)
 
     return {"success": True, "rating": rating}
@@ -701,6 +713,7 @@ def list_ab_tests(user: User = Depends(require_user)):
     if user.role != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
     from web.ab_test import ab_manager
+
     results = {}
     for name in ab_manager._experiments:
         results[name] = ab_manager.get_results(name)
@@ -713,6 +726,7 @@ def get_online_eval(user: User = Depends(require_user)):
     if user.role != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
     from web.online_eval import online_eval
+
     return online_eval.get_all_metrics()
 
 
@@ -722,6 +736,7 @@ def get_adaptive_weights(user: User = Depends(require_user)):
     if user.role != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
     from web.weight_adaptation import weight_adapter
+
     return {"weights": weight_adapter.get_weights(), "update_count": weight_adapter._update_count}
 
 
@@ -731,6 +746,7 @@ def reset_adaptive_weights(user: User = Depends(require_user)):
     if user.role != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
     from web.weight_adaptation import weight_adapter
+
     with weight_adapter._lock:
         weight_adapter._weights = {"vector": 0.4, "bm25": 0.3, "graph": 0.3}
         weight_adapter._update_count = 0
@@ -874,8 +890,9 @@ async def ask_stream(request: Request, user: User = Depends(require_user), db: S
 
 @router.get("/health")
 def health_check():
-    from law_assistant.redis_utils import is_available
     from sqlalchemy import text as _text
+
+    from law_assistant.redis_utils import is_available
 
     redis_ok = is_available()
     db_ok = False

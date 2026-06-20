@@ -41,6 +41,10 @@ class DocumentProcessor:
 
     def _is_legal_content(self, file_path: str, content: str) -> bool:
         """基于文件名和已加载内容判断是否为法律文档（不重复加载文件）"""
+        # JSON 数据集（CAIL、问答对等）不走法律文档路径
+        if file_path.lower().endswith(".json"):
+            return False
+
         filename = os.path.basename(file_path)
         legal_keywords = ["法", "条例", "规定", "办法", "细则", "章程", "规范", "法律"]
         filename_lower = filename.lower()
@@ -284,8 +288,69 @@ class DocumentProcessor:
             return loader.load()
         elif file_path.lower().endswith((".jpg", ".jpeg", ".png", ".bmp", ".tiff")):
             return self._load_image_with_ocr(file_path)
+        elif file_path.lower().endswith(".json"):
+            return self._load_json_documents(file_path)
         else:
             raise ValueError(f"不支持的文件格式: {file_path}")
+
+    def _load_json_documents(self, file_path: str) -> list:
+        """加载 JSON/JSONL 格式的法律数据集
+
+        支持两种格式:
+        - JSON 数组: [{"id": ..., "input": ..., "output": ...}, ...]
+        - JSONL (每行一个 JSON): 支持 CAIL 格式 {fact, meta} 和问答格式 {input, output}
+        """
+        import json as json_mod
+
+        from langchain_core.documents import Document
+
+        documents = []
+
+        with open(file_path, encoding="utf-8") as f:
+            content = f.read().strip()
+
+        # 尝试 JSON 数组格式
+        if content.startswith("["):
+            try:
+                records = json_mod.loads(content)
+            except json_mod.JSONDecodeError:
+                records = []
+        else:
+            # JSONL 格式：逐行解析
+            records = []
+            for line in content.split("\n"):
+                line = line.strip()
+                if line:
+                    try:
+                        records.append(json_mod.loads(line))
+                    except json_mod.JSONDecodeError:
+                        continue
+
+        for i, record in enumerate(records):
+            # CAIL 格式：{fact, meta}
+            if "fact" in record and "meta" in record:
+                meta = record["meta"]
+                accusations = ", ".join(meta.get("accusation", []))
+                articles = ", ".join(str(a) for a in meta.get("relevant_articles", []))
+                text = f"案件事实：{record['fact']}"
+                if accusations:
+                    text += f"\n罪名：{accusations}"
+                if articles:
+                    text += f"\n相关法条：{articles}"
+                doc_id = f"cail_{i}"
+            # 问答格式：{id, input, output}
+            elif "input" in record and "output" in record:
+                text = f"问题：{record['input']}\n回答：{record['output']}"
+                doc_id = record.get("id", f"qa_{i}")
+            # 通用格式：尝试拼接所有字段
+            else:
+                text = "\n".join(f"{k}: {v}" for k, v in record.items() if v)
+                doc_id = record.get("id", f"doc_{i}")
+
+            documents.append(Document(page_content=text, metadata={"source": file_path, "id": doc_id}))
+
+        logger.info(f"[JSON] 从 {file_path} 加载了 {len(documents)} 条记录")
+        return documents
 
     def _extract_structured_articles(self, content: str) -> list[dict[str, Any]]:
         """从文本中提取结构化的法律条款"""

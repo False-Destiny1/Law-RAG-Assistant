@@ -52,7 +52,7 @@ def context_recall(retrieved_docs: list[str], reference_contexts: list[str]) -> 
     使用条文号 + 法律名称 + 关键术语的组合匹配，任一命中即视为召回。
     """
     if not reference_contexts:
-        return 1.0
+        return None  # 空 reference 不参与 recall 均值计算
 
     if not retrieved_docs:
         return 0.0
@@ -387,7 +387,7 @@ def _aggregate_metrics(metrics_list: list[dict]) -> dict:
     keys = metrics_list[0].keys()
     result = {}
     for key in keys:
-        values = [m[key] for m in metrics_list if key in m]
+        values = [m[key] for m in metrics_list if key in m and m[key] is not None]
         if values:
             result[key] = {
                 "mean": round(sum(values) / len(values), 4),
