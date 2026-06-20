@@ -372,6 +372,43 @@ MATCH (l:Law) RETURN l LIMIT 50
 MATCH (l:Law {name: "民法典"})-[:CONTAINS]->(a:Article) RETURN l, a LIMIT 30
 ```
 
+## 数据集
+
+### CAIL 法律判决数据集
+
+项目包含完整的 CAIL（Chinese AI and Law）法律竞赛数据集，位于 `data/knowledge_base/final_all_data/`：
+
+| 数据集 | 文件 | 数据量 | 大小 |
+|--------|------|--------|------|
+| exercise_contest | data_train.json | 154,592 条 | 236 MB |
+
+**数据格式（JSONL）：**
+
+```json
+{
+  "fact": "案件事实描述...",
+  "meta": {
+    "relevant_articles": [234],        // 相关法条编号
+    "accusation": ["故意伤害"],         // 罪名
+    "punish_of_money": 0,              // 罚金（元）
+    "criminals": ["被告人"],            // 被告人
+    "term_of_imprisonment": {          // 刑期
+      "death_penalty": false,          // 是否死刑
+      "imprisonment": 12,              // 有期徒刑（月）
+      "life_imprisonment": false       // 是否无期徒刑
+    }
+  }
+}
+```
+
+**数据用途：**
+
+- 法律问答系统训练和评估
+- 罪名预测、法条推荐、刑期预测等 NLP 任务
+- RAG 检索增强的知识库补充
+
+---
+
 ## 项目亮点
 
 - **三路融合检索**: FAISS 向量检索 + BM25 关键词检索 + Neo4j 知识图谱检索，使用 Reciprocal Rank Fusion 融合排序，兼顾语义匹配、精确关键词和结构化关系
